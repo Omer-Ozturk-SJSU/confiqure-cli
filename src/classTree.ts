@@ -1,0 +1,329 @@
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import Parser from "web-tree-sitter";
+
+/**
+ * Tree-sitter-driven reachability for `@Confiqure`-rooted class graphs.
+ *
+ * The classic confiqure scan was "does this file contain `@Confiqure`?" — which
+ * silently dropped every nested class the AI needs to understand. This module
+ * parses each candidate source file into an AST, then walks the field-type
+ * graph from each annotated root so we send the backend exactly the files that
+ * matter (root + everything transitively referenced), not the whole scanPath.
+ *
+ * V1 supports Java. The factory wires `web-tree-sitter` + a bundled `.wasm`
+ * grammar; adding Kotlin/Scala/etc. is a matter of registering another grammar
+ * here and providing matching node-type extractors.
+ */
+
+const require = createRequire(import.meta.url);
+
+type SyntaxNode = Parser.SyntaxNode;
+
+function resolveGrammarWasm(grammarFile: string): string {
+  const pkgJson = require.resolve("tree-sitter-wasms/package.json");
+  return join(dirname(pkgJson), "out", grammarFile);
+}
+
+let parserReady: Promise<void> | null = null;
+let javaLanguage: Parser.Language | null = null;
+
+async function ensureJavaParser(): Promise<Parser> {
+  if (!parserReady) {
+    parserReady = Parser.init();
+  }
+  await parserReady;
+  if (!javaLanguage) {
+    javaLanguage = await Parser.Language.load(resolveGrammarWasm("tree-sitter-java.wasm"));
+  }
+  const parser = new Parser();
+  parser.setLanguage(javaLanguage);
+  return parser;
+}
+
+export type DeclKind = "class" | "interface" | "enum" | "record";
+
+export interface ParsedField {
+  name: string;
+  /** Raw type expression, e.g. "List<Channel>". */
+  typeText: string;
+  /** Unwrapped type identifiers — includes wrapper + inner generic args. */
+  typeNames: string[];
+  /** Immediately-preceding block/line comment text, if any. */
+  doc: string | null;
+  /** True if `doc` contains an `@confiqure` tag. */
+  hasConfiqureTag: boolean;
+}
+
+export interface ParsedDecl {
+  kind: DeclKind;
+  name: string;
+  hasConfiqureAnnotation: boolean;
+  fields: ParsedField[];
+}
+
+export interface ParsedFile {
+  filePath: string;
+  packageName: string | null;
+  declarations: ParsedDecl[];
+}
+
+export interface ClassTree {
+  rootFile: string;
+  rootClass: string;
+  /** Files reachable from this root, including the root file itself. */
+  reachableFiles: Set<string>;
+  /** Class names walked while building this tree (for logging). */
+  visitedClasses: string[];
+  /** Other `@Confiqure`-annotated classes subsumed by this tree. */
+  subsumedConfiqureClasses: string[];
+}
+
+export interface BuildClassTreesResult {
+  trees: ClassTree[];
+  /** className → rootClass that owns it (only for subsumed @Confiqure classes). */
+  subsumed: Map<string, string>;
+}
+
+/** Parse every Java file in `allFiles`. Non-Java files are skipped silently. */
+export async function parseJavaFiles(allFiles: Map<string, string>): Promise<ParsedFile[]> {
+  const javaPaths = Array.from(allFiles.keys()).filter((p) => p.endsWith(".java"));
+  if (javaPaths.length === 0) return [];
+
+  const parser = await ensureJavaParser();
+  const result: ParsedFile[] = [];
+
+  try {
+    for (const filePath of javaPaths) {
+      const source = allFiles.get(filePath);
+      if (source == null) continue;
+      const tree = parser.parse(source);
+      if (!tree) continue;
+      result.push(extractFile(filePath, tree.rootNode));
+    }
+  } finally {
+    parser.delete();
+  }
+  return result;
+}
+
+/** Parse a single Java file from disk. */
+export async function parseJavaFile(filePath: string): Promise<ParsedFile | null> {
+  const parser = await ensureJavaParser();
+  try {
+    const source = await readFile(filePath, "utf8");
+    const tree = parser.parse(source);
+    if (!tree) return null;
+    return extractFile(filePath, tree.rootNode);
+  } finally {
+    parser.delete();
+  }
+}
+
+function extractFile(filePath: string, root: SyntaxNode): ParsedFile {
+  let packageName: string | null = null;
+  const declarations: ParsedDecl[] = [];
+
+  for (const child of root.namedChildren) {
+    if (!child) continue;
+    if (child.type === "package_declaration") {
+      packageName = extractPackageName(child);
+    } else if (isTypeDeclaration(child.type)) {
+      const decl = extractDeclaration(child);
+      if (decl) declarations.push(decl);
+    }
+  }
+
+  return { filePath, packageName, declarations };
+}
+
+function isTypeDeclaration(type: string): boolean {
+  return (
+    type === "class_declaration" ||
+    type === "interface_declaration" ||
+    type === "enum_declaration" ||
+    type === "record_declaration"
+  );
+}
+
+function extractPackageName(node: SyntaxNode): string | null {
+  for (const child of node.namedChildren) {
+    if (!child) continue;
+    if (child.type === "scoped_identifier" || child.type === "identifier") {
+      return child.text;
+    }
+  }
+  return null;
+}
+
+function extractDeclaration(node: SyntaxNode): ParsedDecl | null {
+  const kind: DeclKind =
+    node.type === "class_declaration"
+      ? "class"
+      : node.type === "interface_declaration"
+        ? "interface"
+        : node.type === "enum_declaration"
+          ? "enum"
+          : "record";
+
+  const nameNode = node.childForFieldName("name");
+  if (!nameNode) return null;
+  const name = nameNode.text;
+
+  const hasConfiqureAnnotation = declarationHasConfiqure(node);
+
+  const body = node.childForFieldName("body");
+  const fields: ParsedField[] = [];
+  if (body && (kind === "class" || kind === "record")) {
+    let pendingDoc: string | null = null;
+    for (const child of body.namedChildren) {
+      if (!child) continue;
+      if (child.type === "block_comment" || child.type === "line_comment") {
+        pendingDoc = pendingDoc ? `${pendingDoc}\n${child.text}` : child.text;
+        continue;
+      }
+      if (child.type === "field_declaration") {
+        const extracted = extractFields(child, pendingDoc);
+        fields.push(...extracted);
+      }
+      pendingDoc = null;
+    }
+  }
+
+  return { kind, name, hasConfiqureAnnotation, fields };
+}
+
+function declarationHasConfiqure(node: SyntaxNode): boolean {
+  for (const child of node.children) {
+    if (!child) continue;
+    if (child.type !== "modifiers") continue;
+    for (const mod of child.namedChildren) {
+      if (!mod) continue;
+      if (mod.type !== "marker_annotation" && mod.type !== "annotation") continue;
+      const annName = mod.childForFieldName("name");
+      if (!annName) continue;
+      const simple = lastSegment(annName.text);
+      if (simple === "Confiqure") return true;
+    }
+  }
+  return false;
+}
+
+function lastSegment(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot === -1 ? name : name.slice(dot + 1);
+}
+
+function extractFields(fieldDecl: SyntaxNode, doc: string | null): ParsedField[] {
+  const typeNode = fieldDecl.childForFieldName("type");
+  if (!typeNode) return [];
+  const typeText = typeNode.text;
+  const typeNames = collectTypeIdentifiers(typeNode);
+
+  const out: ParsedField[] = [];
+  for (const child of fieldDecl.namedChildren) {
+    if (!child) continue;
+    if (child.type !== "variable_declarator") continue;
+    const nameNode = child.childForFieldName("name");
+    if (!nameNode) continue;
+    out.push({
+      name: nameNode.text,
+      typeText,
+      typeNames,
+      doc,
+      hasConfiqureTag: doc != null && /@confiqure\b/i.test(doc),
+    });
+  }
+  return out;
+}
+
+/**
+ * Walk a `type` subtree and return every type identifier we see — the wrapper
+ * type plus every generic argument. E.g. `Map<String, List<Channel>>` →
+ * ["Map", "String", "List", "Channel"]. The resolver later filters these
+ * against the in-project class index, so non-project types (String, etc.)
+ * fall away naturally.
+ */
+function collectTypeIdentifiers(node: SyntaxNode): string[] {
+  const out: string[] = [];
+  const visit = (n: SyntaxNode | null): void => {
+    if (!n) return;
+    if (n.type === "type_identifier") {
+      out.push(n.text);
+    } else if (n.type === "scoped_type_identifier") {
+      out.push(lastSegment(n.text));
+    }
+    for (const c of n.namedChildren) visit(c);
+  };
+  visit(node);
+  return out;
+}
+
+/**
+ * From the set of parsed files, build one ClassTree per `@Confiqure` root.
+ * If a `@Confiqure` class is reachable from another root, it's marked
+ * subsumed instead of producing its own tree — that's how nested
+ * configuration classes (e.g. PushPreferences inside NotificationPreferences)
+ * stop showing up as duplicate endpoints.
+ */
+export function buildClassTrees(parsed: ParsedFile[]): BuildClassTreesResult {
+  const classNameToDecl = new Map<string, { file: string; decl: ParsedDecl }>();
+  for (const pf of parsed) {
+    for (const decl of pf.declarations) {
+      if (!classNameToDecl.has(decl.name)) {
+        classNameToDecl.set(decl.name, { file: pf.filePath, decl });
+      }
+    }
+  }
+
+  const rootCandidates: { file: string; decl: ParsedDecl }[] = [];
+  for (const pf of parsed) {
+    for (const decl of pf.declarations) {
+      if (decl.hasConfiqureAnnotation) rootCandidates.push({ file: pf.filePath, decl });
+    }
+  }
+
+  const rawTrees: ClassTree[] = rootCandidates.map(({ file, decl }) => {
+    const reachableFiles = new Set<string>();
+    const visitedClasses: string[] = [];
+    const stack: string[] = [decl.name];
+
+    while (stack.length > 0) {
+      const className = stack.pop()!;
+      const found = classNameToDecl.get(className);
+      if (!found) continue;
+      if (reachableFiles.has(found.file)) continue;
+      reachableFiles.add(found.file);
+      visitedClasses.push(className);
+      if (found.decl.kind === "class" || found.decl.kind === "record") {
+        for (const field of found.decl.fields) {
+          for (const t of field.typeNames) stack.push(t);
+        }
+      }
+    }
+
+    return {
+      rootFile: file,
+      rootClass: decl.name,
+      reachableFiles,
+      visitedClasses,
+      subsumedConfiqureClasses: [],
+    };
+  });
+
+  const rootClassNames = new Set(rawTrees.map((t) => t.rootClass));
+  const subsumed = new Map<string, string>();
+  for (const tree of rawTrees) {
+    for (const cls of tree.visitedClasses) {
+      if (cls === tree.rootClass) continue;
+      if (rootClassNames.has(cls)) {
+        tree.subsumedConfiqureClasses.push(cls);
+        subsumed.set(cls, tree.rootClass);
+      }
+    }
+  }
+
+  const trees = rawTrees.filter((t) => !subsumed.has(t.rootClass));
+  return { trees, subsumed };
+}

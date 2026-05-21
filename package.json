@@ -1,0 +1,54 @@
+{
+  "name": "@confiqure/cli",
+  "version": "0.1.0",
+  "description": "confiqure.ai CLI — push @Confiqure-annotated classes to your workspace",
+  "type": "module",
+  "bin": {
+    "confiqure": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "confiqure",
+    "cli",
+    "ai",
+    "configuration",
+    "chat",
+    "annotations"
+  ],
+  "homepage": "https://confiqure.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Omer-Ozturk-SJSU/confiqure-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Omer-Ozturk-SJSU/confiqure-cli/issues"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@inquirer/prompts": "^7.0.0",
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "fast-glob": "^3.3.2",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.22.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
