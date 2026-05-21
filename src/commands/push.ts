@@ -3,8 +3,8 @@ import { confirm } from "@inquirer/prompts";
 import chalk from "chalk";
 import { requireCredentials } from "../credentials.js";
 import { loadConfig } from "../config.js";
-import { scanProject, ScanResult } from "../scan.js";
-import { diffAgainstRegistry, renderDiff } from "../diff.js";
+import { scanProject, ScanResult, DiscoveredClass } from "../scan.js";
+import { ChangeEntry, DiffResult, diffAgainstRegistry, renderDiff } from "../diff.js";
 import {
   getRegistry,
   postUpload,
@@ -26,6 +26,7 @@ interface PushOpts {
   yes?: boolean;
   allowDirty?: boolean;
   watch?: boolean;
+  force?: boolean;
 }
 
 const WATCH_TIMEOUT_MS = 30_000;
@@ -41,6 +42,10 @@ export function registerPush(program: Command): void {
       "upload working-tree (uncommitted) content; backend gitVersion will not match any committed SHA"
     )
     .option("--no-watch", "don't poll for playbook generation completion after upload")
+    .option(
+      "-f, --force",
+      "re-upload every annotated class regardless of gitSha — use after editing an agent's prompt to regenerate playbooks without faking a source change"
+    )
     .action(async (opts: PushOpts) => {
       const cwd = process.cwd();
       const creds = await requireCredentials();
@@ -56,8 +61,22 @@ export function registerPush(program: Command): void {
       console.log();
       console.log(renderTrees(scan));
 
-      const registry = await getRegistry(creds);
-      const diff = diffAgainstRegistry(scan.annotated, registry);
+      let diff: DiffResult;
+      if (opts.force) {
+        // Bypass the registry diff — treat every annotated root as CHANGED so
+        // the backend creates a fresh push_history row + re-fires Composer.
+        // Useful right after editing an agent's prompt: regenerates playbooks
+        // without faking a source-file edit just to flip the gitSha.
+        diff = forceAllChanged(scan.annotated);
+        console.log();
+        console.log(
+          chalk.yellow("⚠"),
+          chalk.bold(`Force mode: re-uploading ${diff.changes.length} annotated class${diff.changes.length === 1 ? "" : "es"} regardless of registry diff.`)
+        );
+      } else {
+        const registry = await getRegistry(creds);
+        diff = diffAgainstRegistry(scan.annotated, registry);
+      }
 
       console.log();
       console.log(
@@ -169,6 +188,24 @@ export function registerPush(program: Command): void {
         process.exitCode = 1;
       }
     });
+}
+
+/**
+ * Build a synthetic DiffResult marking every annotated class as CHANGED,
+ * bypassing the registry comparison. Used by `--force`. We don't fabricate
+ * DELETED entries here — force is for "regenerate everything I'm currently
+ * shipping," not "wipe and reset."
+ */
+function forceAllChanged(annotated: DiscoveredClass[]): DiffResult {
+  const changes: ChangeEntry[] = annotated.map((c) => ({
+    op: "CHANGED",
+    classUniqueId: c.classUniqueId,
+    className: c.className,
+    configEnd: c.configEnd,
+    filePath: c.filePath,
+    gitSha: c.gitSha,
+  }));
+  return { changes, unchanged: 0 };
 }
 
 /**
