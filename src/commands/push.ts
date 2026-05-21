@@ -197,14 +197,6 @@ function renderTrees(scan: ScanResult): string {
       `${chalk.cyan("⏵")} Root: ${chalk.bold(root.className)}${lang} — ${root.relatedFiles.length} reachable file${root.relatedFiles.length === 1 ? "" : "s"}`
     );
 
-    if (root.subsumedConfiqureClasses.length > 0) {
-      lines.push(
-        chalk.yellow(
-          `    ⚠ Nested @Confiqure classes subsumed under this root: ${root.subsumedConfiqureClasses.join(", ")}`
-        )
-      );
-    }
-
     const sortedFiles = [...root.relatedFiles].sort();
     const lastIdx = sortedFiles.length - 1;
     for (let i = 0; i < sortedFiles.length; i++) {

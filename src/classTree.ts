@@ -76,14 +76,10 @@ export interface ClassTree {
   reachableFiles: Set<string>;
   /** Class names walked while building this tree (for logging). */
   visitedClasses: string[];
-  /** Other `@Confiqure`-annotated classes subsumed by this tree. */
-  subsumedConfiqureClasses: string[];
 }
 
 export interface BuildClassTreesResult {
   trees: ClassTree[];
-  /** className → rootClass that owns it (only for subsumed @Confiqure classes). */
-  subsumed: Map<string, string>;
 }
 
 /** Parse every Java file in `allFiles`. Non-Java files are skipped silently. */
@@ -262,10 +258,19 @@ function collectTypeIdentifiers(node: SyntaxNode): string[] {
 
 /**
  * From the set of parsed files, build one ClassTree per `@Confiqure` root.
- * If a `@Confiqure` class is reachable from another root, it's marked
- * subsumed instead of producing its own tree — that's how nested
- * configuration classes (e.g. PushPreferences inside NotificationPreferences)
- * stop showing up as duplicate endpoints.
+ *
+ * Every class annotated with `@Confiqure` becomes its own tree (its own
+ * endpoint). When a root's field-type graph happens to walk into another
+ * root, the second root's file still ends up in the first root's
+ * reachableFiles — that's intentional, since the AI needs the full type
+ * context to generate a coherent playbook — but the second root ALSO gets
+ * its own tree. Overlapping reachable sets are fine: the manifest dedupes
+ * via Set semantics at upload time.
+ *
+ * (Earlier versions of this code subsumed annotated children under their
+ * parent root. That was wrong — a developer who writes `@Confiqure` on a
+ * class means "this is an endpoint," full stop. If they wanted it as a
+ * sub-block of the parent, they wouldn't have annotated it.)
  */
 export function buildClassTrees(parsed: ParsedFile[]): BuildClassTreesResult {
   const classNameToDecl = new Map<string, { file: string; decl: ParsedDecl }>();
@@ -284,7 +289,7 @@ export function buildClassTrees(parsed: ParsedFile[]): BuildClassTreesResult {
     }
   }
 
-  const rawTrees: ClassTree[] = rootCandidates.map(({ file, decl }) => {
+  const trees: ClassTree[] = rootCandidates.map(({ file, decl }) => {
     const reachableFiles = new Set<string>();
     const visitedClasses: string[] = [];
     const stack: string[] = [decl.name];
@@ -308,22 +313,8 @@ export function buildClassTrees(parsed: ParsedFile[]): BuildClassTreesResult {
       rootClass: decl.name,
       reachableFiles,
       visitedClasses,
-      subsumedConfiqureClasses: [],
     };
   });
 
-  const rootClassNames = new Set(rawTrees.map((t) => t.rootClass));
-  const subsumed = new Map<string, string>();
-  for (const tree of rawTrees) {
-    for (const cls of tree.visitedClasses) {
-      if (cls === tree.rootClass) continue;
-      if (rootClassNames.has(cls)) {
-        tree.subsumedConfiqureClasses.push(cls);
-        subsumed.set(cls, tree.rootClass);
-      }
-    }
-  }
-
-  const trees = rawTrees.filter((t) => !subsumed.has(t.rootClass));
-  return { trees, subsumed };
+  return { trees };
 }

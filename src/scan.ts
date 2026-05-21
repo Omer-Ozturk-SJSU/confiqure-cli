@@ -31,12 +31,6 @@ export interface DiscoveredClass {
   relatedFiles: string[];
   /** Class names walked during reachability (for shell logging). */
   visitedClasses: string[];
-  /**
-   * Other `@Confiqure`-annotated classes nested inside this tree. They are
-   * NOT emitted as separate endpoints, but are surfaced so push can warn the
-   * user about the implicit subsumption.
-   */
-  subsumedConfiqureClasses: string[];
 }
 
 export interface ScanResult {
@@ -128,7 +122,6 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
       gitSha,
       relatedFiles: Array.from(tree.reachableFiles),
       visitedClasses: tree.visitedClasses,
-      subsumedConfiqureClasses: tree.subsumedConfiqureClasses,
     });
     for (const f of tree.reachableFiles) reachableFiles.add(f);
   }
@@ -153,7 +146,6 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
       gitSha,
       relatedFiles: [filePath],
       visitedClasses: [className],
-      subsumedConfiqureClasses: [],
     });
     reachableFiles.add(filePath);
   }
