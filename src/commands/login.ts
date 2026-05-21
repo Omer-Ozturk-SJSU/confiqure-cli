@@ -9,6 +9,33 @@ import {
 } from "../credentials.js";
 import { ApiError, getWhoami } from "../api.js";
 
+/**
+ * A confiqure API token is `cqai_` + 43 url-safe base64 chars (no padding) =
+ * exactly 48 chars. Anything shorter is almost certainly a clipboard
+ * truncation — surface that locally instead of letting the user discover it
+ * via a server-side "Invalid token" 401.
+ */
+const TOKEN_TOTAL_LEN = 48;
+
+function validateToken(v: string): true | string {
+  const trimmed = v.trim();
+  if (trimmed !== v) {
+    return "Token has leading/trailing whitespace — copy again without surrounding spaces.";
+  }
+  if (!v.startsWith("cqai_")) {
+    return "Token must start with cqai_";
+  }
+  if (v.length !== TOKEN_TOTAL_LEN) {
+    return `Token must be exactly ${TOKEN_TOTAL_LEN} characters; got ${v.length}. Looks truncated — paste from the dashboard's copy button.`;
+  }
+  // base64 url-safe alphabet check on the secret portion.
+  const secret = v.slice(5);
+  if (!/^[A-Za-z0-9_-]+$/.test(secret)) {
+    return "Token contains characters outside the url-safe base64 alphabet. Re-copy from the dashboard.";
+  }
+  return true;
+}
+
 export function registerLogin(program: Command): void {
   program
     .command("login")
@@ -32,9 +59,14 @@ export function registerLogin(program: Command): void {
         (await password({
           message: "API token (cqai_…):",
           mask: "*",
-          validate: (v) =>
-            v.startsWith("cqai_") && v.length >= 16 ? true : "Token must start with cqai_",
+          validate: validateToken,
         }));
+      // --token bypasses the prompt validator, so re-check explicitly.
+      const flagError = opts.token ? validateToken(opts.token) : true;
+      if (flagError !== true) {
+        console.error(chalk.red("✗"), flagError);
+        process.exit(1);
+      }
 
       // Resolve workspaceKey. Manual override skips the network call (useful
       // for CI / offline setup); otherwise we ask the backend.
