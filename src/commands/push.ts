@@ -3,7 +3,7 @@ import { confirm } from "@inquirer/prompts";
 import chalk from "chalk";
 import { requireCredentials } from "../credentials.js";
 import { loadConfig } from "../config.js";
-import { scanProject, ScanResult, DiscoveredClass } from "../scan.js";
+import { scanProject, ScanResult, DiscoveredClass, ToolFile } from "../scan.js";
 import { ChangeEntry, DiffResult, diffAgainstRegistry, renderDiff } from "../diff.js";
 import {
   getRegistry,
@@ -53,7 +53,8 @@ export function registerPush(program: Command): void {
 
       // ── 1. Scan + diff ───────────────────────────────────────────────────
       const scan = await scanProject(cwd, config);
-      console.log(chalk.dim(`Scanned ${scan.allFiles.size} files; ${scan.annotated.length} @Confiqure root${scan.annotated.length === 1 ? "" : "s"}.`));
+      const toolCount = scan.toolFiles.length;
+      console.log(chalk.dim(`Scanned ${scan.allFiles.size} files; ${scan.annotated.length} @Confiqure root${scan.annotated.length === 1 ? "" : "s"}, ${toolCount} @Confiqure.Tool controller${toolCount === 1 ? "" : "s"}.`));
 
       // Show the class tree per root so the user can see exactly which files
       // we'll ship and why — covers the case the keyword scan used to miss
@@ -137,6 +138,11 @@ export function registerPush(program: Command): void {
       const shaCount = files.filter((f) => f.sha !== "").length;
       console.log(chalk.dim(`Git SHAs computed for ${shaCount}/${files.length} files.`));
 
+      const toolFileEntries: ManifestFileEntry[] = scan.toolFiles.map((tf) => ({
+        path: tf.filePath,
+        sha: tf.gitSha,
+      }));
+
       const manifest: Manifest = {
         workspaceKey: creds.workspaceKey,
         gitRef: ref,
@@ -144,13 +150,20 @@ export function registerPush(program: Command): void {
         language: scan.primaryLanguage,
         changes: diff.changes,
         files,
+        toolFiles: toolFileEntries.length > 0 ? toolFileEntries : undefined,
       };
 
-      // Ship only the files actually referenced by an annotated root.
+      // Ship only the files actually referenced by an annotated root + tool controllers.
       const uploadFiles = new Map<string, string>();
       for (const p of uploadPaths) {
         const content = scan.allFiles.get(p);
         if (content != null) uploadFiles.set(p, content);
+      }
+      for (const tf of scan.toolFiles) {
+        if (!uploadFiles.has(tf.filePath)) {
+          const content = scan.allFiles.get(tf.filePath);
+          if (content != null) uploadFiles.set(tf.filePath, content);
+        }
       }
       const result = await postUpload(creds, manifest, uploadFiles);
       console.log();

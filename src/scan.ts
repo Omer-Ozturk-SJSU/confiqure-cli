@@ -33,9 +33,17 @@ export interface DiscoveredClass {
   visitedClasses: string[];
 }
 
+/** A controller file containing @Confiqure.Tool methods. */
+export interface ToolFile {
+  filePath: string;
+  gitSha: string;
+}
+
 export interface ScanResult {
   /** Annotated root classes (one per `@Confiqure` endpoint). */
   annotated: DiscoveredClass[];
+  /** Controller files with @Confiqure.Tool methods. */
+  toolFiles: ToolFile[];
   /** All scanned files keyed by relative path → content. */
   allFiles: Map<string, string>;
   /** Language with the most annotated roots. */
@@ -106,7 +114,21 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
   }
 
   const annotated: DiscoveredClass[] = [];
+  const toolFiles: ToolFile[] = [];
   const reachableFiles = new Set<string>();
+
+  // Detect @Confiqure.Tool methods in Java files (controller classes).
+  // These files get shipped as toolFiles so Composer can extract tool metadata.
+  if (javaFiles.size > 0) {
+    const parsed = await parseJavaFiles(javaFiles);
+    for (const pf of parsed) {
+      if (fileHasConfiqureTool(pf.declarations, allFiles.get(pf.filePath) ?? "")) {
+        const gitSha = await gitHashObject(pf.filePath, cwd).catch(() => "");
+        toolFiles.push({ filePath: pf.filePath, gitSha });
+        reachableFiles.add(pf.filePath);
+      }
+    }
+  }
 
   for (const tree of javaTrees) {
     const content = allFiles.get(tree.rootFile) ?? "";
@@ -163,7 +185,11 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
     }
   }
 
-  return { annotated, allFiles, primaryLanguage, reachableFiles };
+  return { annotated, toolFiles, allFiles, primaryLanguage, reachableFiles };
+}
+
+function fileHasConfiqureTool(declarations: import("./classTree.js").ParsedDecl[], source: string): boolean {
+  return source.includes("@Confiqure.Tool") || source.includes("@Tool");
 }
 
 function extractEnd(source: string): string | null {

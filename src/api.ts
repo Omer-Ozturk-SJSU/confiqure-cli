@@ -40,6 +40,7 @@ export interface Manifest {
   language: string;
   changes: ChangeEntry[];
   files: ManifestFileEntry[];
+  toolFiles?: ManifestFileEntry[];
 }
 
 export class ApiError extends Error {
