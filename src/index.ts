@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import chalk from "chalk";
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 import { registerLogin } from "./commands/login.js";
 import { registerInit } from "./commands/init.js";
 import { registerStatus } from "./commands/status.js";
@@ -10,11 +13,15 @@ import { registerScaffold } from "./commands/scaffold.js";
 import { registerTools } from "./commands/tools.js";
 import { registerWorkspace } from "./commands/workspace.js";
 
+const pkg = JSON.parse(
+  readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../package.json"), "utf8")
+);
+
 const program = new Command();
 program
   .name("confiqure")
   .description("confiqure.ai CLI — push @Confiqure-annotated classes to your workspace")
-  .version("0.1.0");
+  .version(pkg.version);
 
 registerLogin(program);
 registerInit(program);
