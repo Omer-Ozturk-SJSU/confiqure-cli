@@ -1,6 +1,6 @@
 {
   "name": "@confiqure/cli",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "confiqure.ai CLI — push @Confiqure-annotated classes to your workspace",
   "type": "module",
   "bin": {
