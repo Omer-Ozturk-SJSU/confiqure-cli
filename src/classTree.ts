@@ -63,10 +63,27 @@ export interface ParsedDecl {
   fields: ParsedField[];
 }
 
+/** A `@Confiqure.Tool`-annotated method discovered during the scan. */
+export interface ParsedTool {
+  /** Tool name (from `name=` arg, else the method name). */
+  name: string;
+  /** From the `serverSide` arg; defaults to true. */
+  serverSide: boolean;
+  /** The `@RequestBody` param type (or first param type) — the input DTO. */
+  inputType: string | null;
+  /** Method return type. */
+  returnType: string | null;
+  /** Preceding Javadoc/comment, if any. */
+  doc: string | null;
+  /** File the tool was declared in. */
+  sourceFile: string;
+}
+
 export interface ParsedFile {
   filePath: string;
   packageName: string | null;
   declarations: ParsedDecl[];
+  tools: ParsedTool[];
 }
 
 export interface ClassTree {
@@ -120,6 +137,7 @@ export async function parseJavaFile(filePath: string): Promise<ParsedFile | null
 function extractFile(filePath: string, root: SyntaxNode): ParsedFile {
   let packageName: string | null = null;
   const declarations: ParsedDecl[] = [];
+  const tools: ParsedTool[] = [];
 
   for (const child of root.namedChildren) {
     if (!child) continue;
@@ -128,10 +146,107 @@ function extractFile(filePath: string, root: SyntaxNode): ParsedFile {
     } else if (isTypeDeclaration(child.type)) {
       const decl = extractDeclaration(child);
       if (decl) declarations.push(decl);
+      tools.push(...extractToolMethods(child, filePath));
     }
   }
 
-  return { filePath, packageName, declarations };
+  return { filePath, packageName, declarations, tools };
+}
+
+/** Scan a type declaration's body for `@Confiqure.Tool`-annotated methods. */
+function extractToolMethods(typeNode: SyntaxNode, filePath: string): ParsedTool[] {
+  const body = typeNode.childForFieldName("body");
+  if (!body) return [];
+  const out: ParsedTool[] = [];
+  let pendingDoc: string | null = null;
+  for (const child of body.namedChildren) {
+    if (!child) continue;
+    if (child.type === "block_comment" || child.type === "line_comment") {
+      pendingDoc = pendingDoc ? `${pendingDoc}\n${child.text}` : child.text;
+      continue;
+    }
+    if (child.type === "method_declaration") {
+      const tool = extractToolFromMethod(child, pendingDoc, filePath);
+      if (tool) out.push(tool);
+    }
+    pendingDoc = null;
+  }
+  return out;
+}
+
+function extractToolFromMethod(method: SyntaxNode, doc: string | null, filePath: string): ParsedTool | null {
+  const ann = findToolAnnotation(method);
+  if (!ann) return null;
+
+  const methodName = method.childForFieldName("name")?.text ?? "";
+  const nameArg = annotationStringArg(ann, "name");
+  const name = nameArg && nameArg.length > 0 ? nameArg : methodName;
+
+  const serverSideRaw = annotationRawArg(ann, "serverSide");
+  const serverSide = serverSideRaw == null ? true : serverSideRaw.trim() === "true";
+
+  const returnType = method.childForFieldName("type")?.text ?? null;
+  const inputType = extractInputType(method);
+
+  return { name, serverSide, inputType, returnType, doc, sourceFile: filePath };
+}
+
+/** Find an `@Confiqure.Tool` / `@Tool` annotation on a method's modifiers. */
+function findToolAnnotation(method: SyntaxNode): SyntaxNode | null {
+  for (const child of method.children) {
+    if (!child || child.type !== "modifiers") continue;
+    for (const mod of child.namedChildren) {
+      if (!mod) continue;
+      if (mod.type !== "annotation" && mod.type !== "marker_annotation") continue;
+      const annName = mod.childForFieldName("name");
+      if (annName && lastSegment(annName.text) === "Tool") return mod;
+    }
+  }
+  return null;
+}
+
+/** Value of a string-literal annotation arg, quotes stripped; null if absent. */
+function annotationStringArg(ann: SyntaxNode, key: string): string | null {
+  const raw = annotationRawArg(ann, key);
+  if (raw == null) return null;
+  return raw.replace(/^"|"$/g, "");
+}
+
+/** Raw text of an annotation arg's value; null if absent. */
+function annotationRawArg(ann: SyntaxNode, key: string): string | null {
+  const args = ann.childForFieldName("arguments");
+  if (!args) return null;
+  for (const pair of args.namedChildren) {
+    if (!pair || pair.type !== "element_value_pair") continue;
+    const k = pair.childForFieldName("key");
+    if (k && k.text === key) {
+      return pair.childForFieldName("value")?.text ?? null;
+    }
+  }
+  return null;
+}
+
+/** The input DTO type: the `@RequestBody` param's type, else the first param's type. */
+function extractInputType(method: SyntaxNode): string | null {
+  const params = method.childForFieldName("parameters");
+  if (!params) return null;
+  let firstType: string | null = null;
+  for (const param of params.namedChildren) {
+    if (!param || param.type !== "formal_parameter") continue;
+    const typeText = param.childForFieldName("type")?.text ?? null;
+    if (firstType == null) firstType = typeText;
+    // Prefer a @RequestBody-annotated param.
+    for (const c of param.children) {
+      if (!c || c.type !== "modifiers") continue;
+      for (const mod of c.namedChildren) {
+        if (!mod) continue;
+        if (mod.type !== "annotation" && mod.type !== "marker_annotation") continue;
+        const annName = mod.childForFieldName("name");
+        if (annName && lastSegment(annName.text) === "RequestBody") return typeText;
+      }
+    }
+  }
+  return firstType;
 }
 
 function isTypeDeclaration(type: string): boolean {

@@ -6,6 +6,7 @@ import { registerInit } from "./commands/init.js";
 import { registerStatus } from "./commands/status.js";
 import { registerDiff } from "./commands/diff.js";
 import { registerPush } from "./commands/push.js";
+import { registerScaffold } from "./commands/scaffold.js";
 import { registerTools } from "./commands/tools.js";
 import { registerWorkspace } from "./commands/workspace.js";
 
@@ -20,6 +21,7 @@ registerInit(program);
 registerStatus(program);
 registerDiff(program);
 registerPush(program);
+registerScaffold(program);
 registerTools(program);
 registerWorkspace(program);
 

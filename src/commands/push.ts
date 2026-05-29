@@ -62,6 +62,16 @@ export function registerPush(program: Command): void {
       console.log();
       console.log(renderTrees(scan));
 
+      const frontendTools = scan.tools.filter((t) => !t.serverSide);
+      if (frontendTools.length > 0) {
+        console.log();
+        console.log(
+          chalk.yellow("⚠"),
+          chalk.bold(`${frontendTools.length} frontend tool${frontendTools.length === 1 ? "" : "s"} declared (${frontendTools.map((t) => t.name).join(", ")}).`)
+        );
+        console.log(chalk.dim("  These need browser handlers: register via confiqure.init({ tools }) or run `confiqure scaffold`."));
+      }
+
       let diff: DiffResult;
       if (opts.force) {
         // Bypass the registry diff — treat every annotated root as CHANGED so
