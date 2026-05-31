@@ -9,6 +9,8 @@ import {
   getRegistry,
   postUpload,
   getPushStatus,
+  promote,
+  sandboxWorkspaceKey,
   Manifest,
   ManifestFileEntry,
   UploadStatusItem,
@@ -27,6 +29,7 @@ interface PushOpts {
   allowDirty?: boolean;
   watch?: boolean;
   force?: boolean;
+  production?: boolean;
 }
 
 const WATCH_TIMEOUT_MS = 30_000;
@@ -35,7 +38,7 @@ const WATCH_INTERVAL_MS = 1000;
 export function registerPush(program: Command): void {
   program
     .command("push")
-    .description("Push @Confiqure-annotated classes to your workspace")
+    .description("Push @Confiqure-annotated classes (defaults to sandbox; --production promotes)")
     .option("-y, --yes", "skip the confirmation prompt")
     .option(
       "--allow-dirty",
@@ -46,6 +49,10 @@ export function registerPush(program: Command): void {
       "-f, --force",
       "re-upload every annotated class regardless of gitSha — use after editing an agent's prompt to regenerate playbooks without faking a source change"
     )
+    .option(
+      "--production",
+      "Promote the active sandbox runbooks to production (no Composer re-run — copies what you tested in sandbox). Requires explicit confirm; use --yes to skip."
+    )
     .action(async (opts: PushOpts) => {
       const cwd = process.cwd();
       const creds = await requireCredentials();
@@ -53,6 +60,17 @@ export function registerPush(program: Command): void {
 
       // ── 1. Scan + diff ───────────────────────────────────────────────────
       const scan = await scanProject(cwd, config);
+
+      // ── Promote-only path: skip the regular upload flow entirely. ────────
+      if (opts.production) {
+        await runPromote(creds, scan, opts);
+        return;
+      }
+
+      // Sandbox is the default target for confiqure push. The prod credentials
+      // workspaceKey is the registered key; the backend authorizes it for the
+      // paired sandbox via ApiKeyAuthHelper.authorizedFor.
+      const targetWorkspaceKey = sandboxWorkspaceKey(creds.workspaceKey);
       const toolCount = scan.toolFiles.length;
       console.log(chalk.dim(`Scanned ${scan.allFiles.size} files; ${scan.annotated.length} @Confiqure root${scan.annotated.length === 1 ? "" : "s"}, ${toolCount} @Confiqure.Tool controller${toolCount === 1 ? "" : "s"}.`));
 
@@ -85,7 +103,7 @@ export function registerPush(program: Command): void {
           chalk.bold(`Force mode: re-uploading ${diff.changes.length} annotated class${diff.changes.length === 1 ? "" : "es"} regardless of registry diff.`)
         );
       } else {
-        const registry = await getRegistry(creds);
+        const registry = await getRegistry(creds, targetWorkspaceKey);
         diff = diffAgainstRegistry(scan.annotated, registry);
       }
 
@@ -154,7 +172,7 @@ export function registerPush(program: Command): void {
       }));
 
       const manifest: Manifest = {
-        workspaceKey: creds.workspaceKey,
+        workspaceKey: targetWorkspaceKey,
         gitRef: ref,
         headSha,
         language: scan.primaryLanguage,
@@ -175,10 +193,10 @@ export function registerPush(program: Command): void {
           if (content != null) uploadFiles.set(tf.filePath, content);
         }
       }
-      const result = await postUpload(creds, manifest, uploadFiles);
+      const result = await postUpload(creds, manifest, uploadFiles, targetWorkspaceKey);
       console.log();
       console.log(
-        chalk.bold(`Uploaded: ${result.accepted}/${result.totalClasses} accepted, ${result.rejected} rejected.`)
+        chalk.bold(`Pushed to sandbox (${targetWorkspaceKey}): ${result.accepted}/${result.totalClasses} accepted, ${result.rejected} rejected.`)
       );
       for (const item of result.items) {
         const icon = item.status === "ACCEPTED"
@@ -206,11 +224,77 @@ export function registerPush(program: Command): void {
 
       console.log();
       console.log(chalk.dim("Waiting for playbook generation…"));
-      const failures = await watchGeneration(creds, acceptedForWatch);
+      const failures = await watchGeneration(creds, acceptedForWatch, targetWorkspaceKey);
       if (failures > 0 || result.rejected > 0) {
         process.exitCode = 1;
       }
+      console.log();
+      console.log(
+        chalk.dim(`Test in sandbox via the dashboard, then promote with: `) +
+          chalk.cyan(`confiqure push --production`)
+      );
     });
+}
+
+/**
+ * Promote-only path: skip the entire diff/upload flow, build the configEnd list
+ * from the local scan, confirm with the user, and call the backend's promote
+ * endpoint. The CLI does NOT re-push source — promote copies the runbook
+ * already living in the sandbox PushHistory to prod verbatim.
+ */
+async function runPromote(
+  creds: Awaited<ReturnType<typeof requireCredentials>>,
+  scan: ScanResult,
+  opts: PushOpts
+): Promise<void> {
+  const targets = scan.annotated
+    .map((c) => c.configEnd)
+    .filter((ce): ce is string => typeof ce === "string" && ce.length > 0);
+  if (targets.length === 0) {
+    console.log(chalk.yellow("No @Confiqure endpoints found locally — nothing to promote."));
+    return;
+  }
+
+  console.log();
+  console.log(
+    chalk.yellow("⚠"),
+    chalk.bold(
+      `About to promote ${targets.length} endpoint${targets.length === 1 ? "" : "s"} from sandbox → production (${creds.workspaceKey}):`
+    )
+  );
+  for (const e of targets) {
+    console.log(`    ${e}`);
+  }
+  console.log();
+
+  if (!opts.yes) {
+    const ok = await confirm({
+      message: "Promote these to production?",
+      default: false,
+    });
+    if (!ok) {
+      console.log(chalk.yellow("Aborted."));
+      return;
+    }
+  }
+
+  try {
+    const resp = await promote(creds, targets);
+    console.log();
+    console.log(
+      chalk.bold(
+        `Promoted ${resp.endpointsPromoted}/${targets.length} endpoint${resp.endpointsPromoted === 1 ? "" : "s"} + ${resp.toolsMirrored} tool${resp.toolsMirrored === 1 ? "" : "s"} → production.`
+      )
+    );
+    for (const ce of resp.promotedConfigEnds) {
+      console.log(`  ${chalk.green("✓")} ${ce}`);
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.log();
+    console.log(chalk.red("✗"), chalk.bold(`Promote failed: ${msg}`));
+    process.exitCode = 1;
+  }
 }
 
 /**
@@ -289,7 +373,8 @@ function printDirtyWarning(dirty: DirtyFile[]): void {
  */
 async function watchGeneration(
   creds: Parameters<typeof getPushStatus>[0],
-  items: UploadStatusItem[]
+  items: UploadStatusItem[],
+  targetWorkspaceKey?: string
 ): Promise<number> {
   const startedAt = Date.now();
   const pending = new Map<number, { className: string; startedAt: number }>();
@@ -313,7 +398,7 @@ async function watchGeneration(
     const doneIds: number[] = [];
     for (const [pushHistoryId, info] of pending) {
       try {
-        const status = await getPushStatus(creds, pushHistoryId);
+        const status = await getPushStatus(creds, pushHistoryId, targetWorkspaceKey);
         if (status.playbookReady) {
           const elapsed = ((Date.now() - info.startedAt) / 1000).toFixed(1);
           console.log(`  ${chalk.green("✓")} ${info.className.padEnd(28)} ready (${elapsed}s)`);

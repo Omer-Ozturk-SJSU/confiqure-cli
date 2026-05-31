@@ -28,6 +28,50 @@ export interface UploadResponse {
   items: UploadStatusItem[];
 }
 
+const SANDBOX_PREFIX = "sb-";
+
+/**
+ * Sandbox urlKey for a production workspaceKey. The credentials file stores
+ * the prod workspaceKey; `confiqure push` (no flag) targets sandbox, so most
+ * URL builds run the key through this first.
+ */
+export function sandboxWorkspaceKey(prodKey: string): string {
+  if (prodKey.startsWith(SANDBOX_PREFIX)) return prodKey;
+  return SANDBOX_PREFIX + prodKey;
+}
+
+export interface PromoteResponse {
+  endpointsPromoted: number;
+  toolsMirrored: number;
+  promotedConfigEnds: string[];
+}
+
+/**
+ * POST /api/{prodKey}/sandbox/promote — copy the sandbox's active runbooks
+ * for the given configEnds to the prod workspace verbatim. Must be called
+ * with the PROD workspaceKey (the credentials file's `workspaceKey`).
+ */
+export async function promote(
+  creds: Credentials,
+  configEnds: string[]
+): Promise<PromoteResponse> {
+  const res = await fetch(
+    `${creds.apiBase}/api/${creds.workspaceKey}/sandbox/promote`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${creds.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ configEnds }),
+    }
+  );
+  if (!res.ok) {
+    throw new ApiError(res.status, `POST /sandbox/promote failed: ${res.status} ${await res.text()}`);
+  }
+  return (await res.json()) as PromoteResponse;
+}
+
 export interface ManifestFileEntry {
   path: string;
   sha: string;
@@ -81,10 +125,12 @@ export interface PushStatus {
 
 export async function getPushStatus(
   creds: Credentials,
-  pushHistoryId: number
+  pushHistoryId: number,
+  targetWorkspaceKey?: string
 ): Promise<PushStatus> {
+  const wsKey = targetWorkspaceKey ?? creds.workspaceKey;
   const res = await fetch(
-    `${creds.apiBase}/api/${creds.workspaceKey}/upload/status/${pushHistoryId}`,
+    `${creds.apiBase}/api/${wsKey}/upload/status/${pushHistoryId}`,
     { headers: { Authorization: `Bearer ${creds.token}` } }
   );
   if (!res.ok) {
@@ -93,9 +139,13 @@ export async function getPushStatus(
   return (await res.json()) as PushStatus;
 }
 
-export async function getRegistry(creds: Credentials): Promise<RegistryItem[]> {
+export async function getRegistry(
+  creds: Credentials,
+  targetWorkspaceKey?: string
+): Promise<RegistryItem[]> {
+  const wsKey = targetWorkspaceKey ?? creds.workspaceKey;
   const res = await fetch(
-    `${creds.apiBase}/api/${creds.workspaceKey}/upload`,
+    `${creds.apiBase}/api/${wsKey}/upload`,
     { headers: { Authorization: `Bearer ${creds.token}` } }
   );
   if (!res.ok) {
@@ -203,7 +253,8 @@ export async function deleteTool(creds: Credentials, name: string): Promise<void
 export async function postUpload(
   creds: Credentials,
   manifest: Manifest,
-  files: Map<string, string>
+  files: Map<string, string>,
+  targetWorkspaceKey?: string
 ): Promise<UploadResponse> {
   const form = new FormData();
   form.append("manifest", JSON.stringify(manifest));
@@ -215,8 +266,9 @@ export async function postUpload(
     form.append("sources", blob, encodeURIComponent(path));
   }
 
+  const wsKey = targetWorkspaceKey ?? creds.workspaceKey;
   const res = await fetch(
-    `${creds.apiBase}/api/${creds.workspaceKey}/upload`,
+    `${creds.apiBase}/api/${wsKey}/upload`,
     {
       method: "POST",
       headers: { Authorization: `Bearer ${creds.token}` },
