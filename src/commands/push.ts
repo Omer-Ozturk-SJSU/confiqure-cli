@@ -57,7 +57,7 @@ export function registerPush(program: Command): void {
     )
     .option(
       "--live",
-      "Alias for --production: promote the tested sandbox runbooks to production. (Production always receives what you validated in sandbox — never a fresh, untested Composer run.)"
+      "Deploy to sandbox, then automatically promote to production once the sandbox generation succeeds — test + ship in one command. (Production receives the runbook validated in sandbox via promote, never a fresh Composer run. On any sandbox failure, nothing is promoted.)"
     )
     .option(
       "--file <path>",
@@ -71,12 +71,11 @@ export function registerPush(program: Command): void {
       // ── 1. Scan + diff ───────────────────────────────────────────────────
       const scan = await scanProject(cwd, config);
 
-      // ── Promote-only path: skip the regular upload flow entirely. ────────
-      // --live is an alias for --production: both promote the *tested* sandbox
-      // runbook to prod (the dashboard "Publish Latest" does the same). There
-      // is deliberately no direct prod push from the CLI — prod must only ever
-      // receive what was validated in sandbox.
-      if (opts.production || opts.live) {
+      // ── Promote-only path (--production): skip the upload flow entirely and
+      // copy the *tested* sandbox runbook to prod verbatim. --live ALSO ends in
+      // a promote, but only after a fresh sandbox deploy below — so it doesn't
+      // short-circuit here.
+      if (opts.production) {
         await runPromote(creds, scan, opts);
         return;
       }
@@ -161,7 +160,9 @@ export function registerPush(program: Command): void {
       // ── 3. Confirm + upload ──────────────────────────────────────────────
       if (!opts.yes) {
         const ok = await confirm({
-          message: `Upload ${diff.changes.length} change${diff.changes.length === 1 ? "" : "s"}?`,
+          message: opts.live
+            ? `Deploy ${diff.changes.length} change${diff.changes.length === 1 ? "" : "s"} to sandbox, then promote to PRODUCTION on success?`
+            : `Upload ${diff.changes.length} change${diff.changes.length === 1 ? "" : "s"}?`,
           default: true,
         });
         if (!ok) {
@@ -239,6 +240,13 @@ export function registerPush(program: Command): void {
       if (opts.watch === false) {
         console.log();
         console.log(chalk.dim("Playbook generation continues in the background — view status in the dashboard."));
+        if (opts.live) {
+          console.log(
+            chalk.yellow("⚠"),
+            "--live needs to watch generation to confirm success — auto-promote skipped. Promote once green with " +
+              chalk.cyan("confiqure push --production") + "."
+          );
+        }
         return;
       }
 
@@ -247,7 +255,53 @@ export function registerPush(program: Command): void {
       const failures = await watchGeneration(creds, acceptedForWatch, targetWorkspaceKey);
       if (failures > 0 || result.rejected > 0) {
         process.exitCode = 1;
+        if (opts.live) {
+          console.log();
+          console.log(
+            chalk.yellow("⚠"),
+            chalk.bold("Sandbox deploy had failures — NOT promoting to production.")
+          );
+          console.log(chalk.dim("  Fix and re-run, or promote manually once green with `confiqure push --production`."));
+        }
+        return;
       }
+
+      // ── 5. --live: sandbox is green → auto-promote the deployed endpoints ──
+      // Promote ships the runbook just validated in sandbox to prod verbatim
+      // (no Composer re-run). Only the endpoints in THIS push are promoted.
+      if (opts.live) {
+        const configEnds = [
+          ...new Set(
+            diff.changes
+              .filter((c) => c.op !== "DELETED")
+              .map((c) => c.configEnd)
+              .filter((ce): ce is string => typeof ce === "string" && ce.length > 0)
+          ),
+        ];
+        console.log();
+        console.log(
+          chalk.dim(
+            `Sandbox deploy succeeded — promoting ${configEnds.length} endpoint${configEnds.length === 1 ? "" : "s"} to production…`
+          )
+        );
+        try {
+          const resp = await promote(creds, configEnds);
+          console.log(
+            chalk.bold(
+              `Promoted ${resp.endpointsPromoted}/${configEnds.length} endpoint${resp.endpointsPromoted === 1 ? "" : "s"} + ${resp.toolsMirrored} tool${resp.toolsMirrored === 1 ? "" : "s"} → production.`
+            )
+          );
+          for (const ce of resp.promotedConfigEnds) {
+            console.log(`  ${chalk.green("✓")} ${ce}`);
+          }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.log(chalk.red("✗"), chalk.bold(`Promote failed: ${msg}`));
+          process.exitCode = 1;
+        }
+        return;
+      }
+
       console.log();
       console.log(
         chalk.dim(`Test in sandbox via the dashboard, then promote with: `) +
