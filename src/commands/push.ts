@@ -174,11 +174,22 @@ export function registerPush(program: Command): void {
       const headSha = await gitHeadSha(cwd);
       const ref = await gitRef(cwd);
 
-      // Upload only files reachable from an annotated root — every file in
-      // the manifest needs a stable git SHA so the backend can pin a version
-      // to commit content. Computing SHAs is one shell-out per file, so
-      // limiting the set keeps push snappy on large repos.
-      const uploadPaths = Array.from(scan.reachableFiles).sort();
+      // Ship only the files reachable from the endpoints that actually CHANGED
+      // in this push — not every root in scanPaths. Unchanged sibling endpoints
+      // already live on the backend; re-bundling them made the backend re-record
+      // them as NESTED rows (and bloated every upload). diff.changes is derived
+      // from scan.annotated, and --force/--file narrow scan.annotated first, so
+      // this stays correct for those paths too.
+      const changedClassIds = new Set(
+        diff.changes.filter((c) => c.op !== "DELETED").map((c) => c.classUniqueId)
+      );
+      const uploadSet = new Set<string>();
+      for (const root of scan.annotated) {
+        if (changedClassIds.has(root.classUniqueId)) {
+          for (const f of root.relatedFiles) uploadSet.add(f);
+        }
+      }
+      const uploadPaths = Array.from(uploadSet).sort();
       const files: ManifestFileEntry[] = [];
       for (const path of uploadPaths) {
         const sha = await gitHashObject(path, cwd).catch(() => "");
