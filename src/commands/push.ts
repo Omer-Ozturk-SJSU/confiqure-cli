@@ -30,6 +30,8 @@ interface PushOpts {
   watch?: boolean;
   force?: boolean;
   production?: boolean;
+  live?: boolean;
+  file?: string;
 }
 
 const WATCH_TIMEOUT_MS = 30_000;
@@ -53,6 +55,14 @@ export function registerPush(program: Command): void {
       "--production",
       "Promote the active sandbox runbooks to production (no Composer re-run — copies what you tested in sandbox). Requires explicit confirm; use --yes to skip."
     )
+    .option(
+      "--live",
+      "Alias for --production: promote the tested sandbox runbooks to production. (Production always receives what you validated in sandbox — never a fresh, untested Composer run.)"
+    )
+    .option(
+      "--file <path>",
+      "Selective push: ship only the annotated class at <path> plus its nested reachable types, instead of every @Confiqure root in scanPaths. <path> may be the full relative path or a suffix like Supplier.java. Sandbox push only."
+    )
     .action(async (opts: PushOpts) => {
       const cwd = process.cwd();
       const creds = await requireCredentials();
@@ -62,9 +72,19 @@ export function registerPush(program: Command): void {
       const scan = await scanProject(cwd, config);
 
       // ── Promote-only path: skip the regular upload flow entirely. ────────
-      if (opts.production) {
+      // --live is an alias for --production: both promote the *tested* sandbox
+      // runbook to prod (the dashboard "Publish Latest" does the same). There
+      // is deliberately no direct prod push from the CLI — prod must only ever
+      // receive what was validated in sandbox.
+      if (opts.production || opts.live) {
         await runPromote(creds, scan, opts);
         return;
+      }
+
+      // --file: narrow the (sandbox) push to a single annotated root + its
+      // nested tree, so a dev can ship one class instead of every endpoint.
+      if (opts.file) {
+        scopeToFile(scan, opts.file);
       }
 
       // Sandbox is the default target for confiqure push. The prod credentials
@@ -295,6 +315,56 @@ async function runPromote(
     console.log(chalk.red("✗"), chalk.bold(`Promote failed: ${msg}`));
     process.exitCode = 1;
   }
+}
+
+/**
+ * Narrow a full scan to a single annotated root (plus its nested reachable
+ * tree), for `--file <path>`. The scan still walks the whole project — it has
+ * to, to resolve the root's nested types — but everything downstream (diff,
+ * manifest, upload) sees only the selected root, so the dev ships one class
+ * instead of every endpoint in scanPaths.
+ *
+ * Matching is lenient: <path> may be the exact relative path the scanner
+ * recorded, a path suffix (`restocker/Supplier.java`), a bare filename
+ * (`Supplier.java`), or an absolute path. If <path> isn't itself a root but is
+ * a nested file some root reaches, we push the owning root(s) so the nested
+ * edit propagates. Tool controllers are dropped — a selective push is
+ * endpoint-focused.
+ */
+function scopeToFile(scan: ScanResult, fileArg: string): void {
+  const norm = (p: string) => p.replace(/\\/g, "/");
+  const target = norm(fileArg);
+  const matches = (filePath: string): boolean => {
+    const fp = norm(filePath);
+    return fp === target || fp.endsWith("/" + target) || target.endsWith("/" + fp);
+  };
+
+  // Prefer a direct root match; fall back to roots that *reach* the file.
+  let roots = scan.annotated.filter((c) => matches(c.filePath));
+  if (roots.length === 0) {
+    roots = scan.annotated.filter((c) => c.relatedFiles.some((f) => matches(f)));
+  }
+  if (roots.length === 0) {
+    console.error(
+      chalk.red("✗"),
+      `--file: no @Confiqure root matches "${fileArg}" (and no root references it).`
+    );
+    console.error(chalk.dim("    Run `confiqure push` without --file to list the roots in scanPaths."));
+    process.exit(1);
+  }
+
+  const reachable = new Set<string>();
+  for (const r of roots) for (const f of r.relatedFiles) reachable.add(f);
+
+  scan.annotated = roots;
+  scan.reachableFiles = reachable;
+  scan.toolFiles = [];
+  scan.tools = [];
+
+  console.log(
+    `${chalk.cyan("⏵")} ${chalk.bold("--file")}: scoped to ${roots.length} root${roots.length === 1 ? "" : "s"}` +
+      ` (${roots.map((r) => r.className).join(", ")}), ${reachable.size} file${reachable.size === 1 ? "" : "s"}.`
+  );
 }
 
 /**
