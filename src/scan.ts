@@ -45,6 +45,14 @@ export interface ScanResult {
   annotated: DiscoveredClass[];
   /** Controller files with @Confiqure.Tool methods. */
   toolFiles: ToolFile[];
+  /**
+   * Files containing a `@Confiqure.DefaultCallbackHook` method. Shipped in the
+   * upload bundle so the Composer can discover the workspace's callback hook
+   * path — even when the hook lives in a controller that is neither a
+   * `@Confiqure` root nor a `@Confiqure.Tool` controller (which the scan would
+   * otherwise never upload).
+   */
+  hookFiles: ToolFile[];
   /** Every @Confiqure.Tool method discovered (server-side + frontend). */
   tools: ParsedTool[];
   /** All scanned files keyed by relative path → content. */
@@ -118,6 +126,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
 
   const annotated: DiscoveredClass[] = [];
   const toolFiles: ToolFile[] = [];
+  const hookFiles: ToolFile[] = [];
   const tools: ParsedTool[] = [];
   const reachableFiles = new Set<string>();
 
@@ -127,10 +136,17 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
     const parsed = await parseJavaFiles(javaFiles);
     for (const pf of parsed) {
       tools.push(...pf.tools);
-      if (fileHasConfiqureTool(pf.declarations, allFiles.get(pf.filePath) ?? "")) {
+      const src = allFiles.get(pf.filePath) ?? "";
+      if (fileHasConfiqureTool(pf.declarations, src)) {
         const gitSha = await gitHashObject(pf.filePath, cwd).catch(() => "");
         toolFiles.push({ filePath: pf.filePath, gitSha });
         reachableFiles.add(pf.filePath);
+      }
+      // A @Confiqure.DefaultCallbackHook can live in any controller — detect it
+      // independently of tools/roots so the hook file always reaches the Composer.
+      if (fileHasCallbackHook(src)) {
+        const gitSha = await gitHashObject(pf.filePath, cwd).catch(() => "");
+        hookFiles.push({ filePath: pf.filePath, gitSha });
       }
     }
   }
@@ -190,11 +206,15 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
     }
   }
 
-  return { annotated, toolFiles, tools, allFiles, primaryLanguage, reachableFiles };
+  return { annotated, toolFiles, hookFiles, tools, allFiles, primaryLanguage, reachableFiles };
 }
 
 function fileHasConfiqureTool(declarations: import("./classTree.js").ParsedDecl[], source: string): boolean {
   return source.includes("@Confiqure.Tool") || source.includes("@Tool");
+}
+
+function fileHasCallbackHook(source: string): boolean {
+  return source.includes("@Confiqure.DefaultCallbackHook") || source.includes("@DefaultCallbackHook");
 }
 
 function extractEnd(source: string): string | null {

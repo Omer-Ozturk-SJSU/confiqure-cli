@@ -189,6 +189,10 @@ export function registerPush(program: Command): void {
           for (const f of root.relatedFiles) uploadSet.add(f);
         }
       }
+      // Always ship @Confiqure.DefaultCallbackHook files (like tool controllers,
+      // they're workspace-level context) so the backend/Composer can discover the
+      // callback hook path wherever it lives — not only inside a scanned root/tool.
+      for (const hf of scan.hookFiles) uploadSet.add(hf.filePath);
       const uploadPaths = Array.from(uploadSet).sort();
       const files: ManifestFileEntry[] = [];
       for (const path of uploadPaths) {
@@ -424,6 +428,7 @@ function scopeToFile(scan: ScanResult, fileArg: string): void {
   scan.annotated = roots;
   scan.reachableFiles = reachable;
   scan.toolFiles = [];
+  scan.hookFiles = [];
   scan.tools = [];
 
   console.log(
