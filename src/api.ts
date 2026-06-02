@@ -254,7 +254,8 @@ export async function postUpload(
   creds: Credentials,
   manifest: Manifest,
   files: Map<string, string>,
-  targetWorkspaceKey?: string
+  targetWorkspaceKey?: string,
+  force = false
 ): Promise<UploadResponse> {
   const form = new FormData();
   form.append("manifest", JSON.stringify(manifest));
@@ -267,8 +268,10 @@ export async function postUpload(
   }
 
   const wsKey = targetWorkspaceKey ?? creds.workspaceKey;
+  // ?force=true tells the backend to bypass its path+SHA dedup so identical
+  // content still creates a fresh revision + re-runs Composer (the point of --force).
   const res = await fetch(
-    `${creds.apiBase}/api/${wsKey}/upload`,
+    `${creds.apiBase}/api/${wsKey}/upload${force ? "?force=true" : ""}`,
     {
       method: "POST",
       headers: { Authorization: `Bearer ${creds.token}` },

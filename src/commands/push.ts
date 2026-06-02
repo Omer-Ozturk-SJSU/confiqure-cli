@@ -229,7 +229,7 @@ export function registerPush(program: Command): void {
           if (content != null) uploadFiles.set(tf.filePath, content);
         }
       }
-      const result = await postUpload(creds, manifest, uploadFiles, targetWorkspaceKey);
+      const result = await postUpload(creds, manifest, uploadFiles, targetWorkspaceKey, opts.force === true);
       console.log();
       console.log(
         chalk.bold(`Pushed to sandbox (${targetWorkspaceKey}): ${result.accepted}/${result.totalClasses} accepted, ${result.rejected} rejected.`)
