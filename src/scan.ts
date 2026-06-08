@@ -1,4 +1,5 @@
 import fastGlob from "fast-glob";
+import chalk from "chalk";
 import { readFile } from "node:fs/promises";
 import { extname, basename } from "node:path";
 import { ProjectConfig } from "./config.js";
@@ -15,7 +16,7 @@ export interface DiscoveredClass {
   classUniqueId: string;
   /** Top-level class name. */
   className: string;
-  /** Resolved annotation `end` (or snake_case className fallback). */
+  /** Resolved annotation `end`; a bare `@Confiqure` (no `end`) resolves to the default endpoint "/". */
   configEnd: string;
   /** Path relative to project root. */
   filePath: string;
@@ -154,7 +155,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
   for (const tree of javaTrees) {
     const content = allFiles.get(tree.rootFile) ?? "";
     const className = tree.rootClass;
-    const configEnd = extractEnd(content) ?? toSnakeCase(className);
+    const configEnd = extractEnd(content) ?? DEFAULT_ENDPOINT;
     const gitSha = await gitHashObject(tree.rootFile, cwd).catch(() => "");
     annotated.push({
       classUniqueId: tree.rootFile,
@@ -178,7 +179,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
 
     const ext = extname(filePath);
     const className = basename(filePath, ext);
-    const configEnd = extractEnd(content) ?? toSnakeCase(className);
+    const configEnd = extractEnd(content) ?? DEFAULT_ENDPOINT;
     const gitSha = await gitHashObject(filePath, cwd).catch(() => "");
     annotated.push({
       classUniqueId: filePath,
@@ -206,6 +207,19 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
     }
   }
 
+  // A workspace can have only ONE default endpoint. A bare `@Confiqure` (no `end`) resolves
+  // to "/", so two end-less classes would both claim it — warn so the developer adds an
+  // explicit `end` to all but one (the backend keeps only one default endpoint regardless).
+  const defaults = annotated.filter((c) => c.configEnd === DEFAULT_ENDPOINT);
+  if (defaults.length > 1) {
+    console.warn(
+      chalk.yellow("⚠"),
+      `${defaults.length} classes have no \`end\` and all resolve to the default endpoint "/", ` +
+        `but a workspace can have only ONE default endpoint. Give all but one an explicit \`end\`. ` +
+        `Classes: ${defaults.map((c) => c.className).join(", ")}`
+    );
+  }
+
   return { annotated, toolFiles, hookFiles, tools, allFiles, primaryLanguage, reachableFiles };
 }
 
@@ -217,14 +231,15 @@ function fileHasCallbackHook(source: string): boolean {
   return source.includes("@Confiqure.DefaultCallbackHook") || source.includes("@DefaultCallbackHook");
 }
 
+/**
+ * The workspace DEFAULT endpoint address. Per the V2 architecture doc, a bare
+ * `@Confiqure` (annotation present, no `end` value) IS the workspace's default
+ * endpoint — reached at configEnd "/" — NOT a class-name-derived slug. So a class
+ * with no parseable `end` resolves here, matching how the backend Composer composes it.
+ */
+const DEFAULT_ENDPOINT = "/";
+
 function extractEnd(source: string): string | null {
   const m = source.match(/\b[Ee]nd\s*[:=]\s*["']([^"']+)["']/);
   return m ? m[1] : null;
-}
-
-function toSnakeCase(s: string): string {
-  return s
-    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
-    .toLowerCase();
 }
