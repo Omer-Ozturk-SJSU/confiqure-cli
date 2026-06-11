@@ -7,6 +7,7 @@ import { gitHashObject } from "./git.js";
 import {
   parseJavaFiles,
   buildClassTrees,
+  collectToolReachableFiles,
   ClassTree,
   ParsedTool,
 } from "./classTree.js";
@@ -65,6 +66,12 @@ export interface ScanResult {
    * upload set so we don't ship unrelated files in scanPaths.
    */
   reachableFiles: Set<string>;
+  /**
+   * Files reachable from TOOL signatures (input DTO + return type graphs).
+   * Without these the Composer can't derive a tool's input schema when its
+   * DTO lives in a file no `@Confiqure` root references.
+   */
+  toolReachableFiles: Set<string>;
 }
 
 interface LangBucket {
@@ -119,22 +126,22 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
   for (const [p, content] of allFiles) {
     if (fileLanguage.get(p) === "java") javaFiles.set(p, content);
   }
-  if (javaFiles.size > 0) {
-    const parsed = await parseJavaFiles(javaFiles);
-    const { trees } = buildClassTrees(parsed);
-    javaTrees.push(...trees);
-  }
 
   const annotated: DiscoveredClass[] = [];
   const toolFiles: ToolFile[] = [];
   const hookFiles: ToolFile[] = [];
   const tools: ParsedTool[] = [];
   const reachableFiles = new Set<string>();
+  const toolReachableFiles = new Set<string>();
 
-  // Detect @Confiqure.Tool methods in Java files (controller classes).
-  // These files get shipped as toolFiles so Composer can extract tool metadata.
+  // One tree-sitter pass serves endpoint reachability, tool detection, AND
+  // tool-signature reachability (the input DTO graph the Composer needs to
+  // derive a tool's input schema — previously never shipped unless an
+  // endpoint happened to reference the same type).
   if (javaFiles.size > 0) {
     const parsed = await parseJavaFiles(javaFiles);
+    const { trees } = buildClassTrees(parsed);
+    javaTrees.push(...trees);
     for (const pf of parsed) {
       tools.push(...pf.tools);
       const src = allFiles.get(pf.filePath) ?? "";
@@ -149,6 +156,9 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
         const gitSha = await gitHashObject(pf.filePath, cwd).catch(() => "");
         hookFiles.push({ filePath: pf.filePath, gitSha });
       }
+    }
+    for (const f of collectToolReachableFiles(parsed, tools)) {
+      toolReachableFiles.add(f);
     }
   }
 
@@ -220,7 +230,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
     );
   }
 
-  return { annotated, toolFiles, hookFiles, tools, allFiles, primaryLanguage, reachableFiles };
+  return { annotated, toolFiles, hookFiles, tools, allFiles, primaryLanguage, reachableFiles, toolReachableFiles };
 }
 
 function fileHasConfiqureTool(declarations: import("./classTree.js").ParsedDecl[], source: string): boolean {

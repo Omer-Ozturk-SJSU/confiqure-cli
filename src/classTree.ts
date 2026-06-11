@@ -61,6 +61,8 @@ export interface ParsedDecl {
   name: string;
   hasConfiqureAnnotation: boolean;
   fields: ParsedField[];
+  /** Enum constants (kind === "enum" only) — closed-set values for typed schemas/scaffolds. */
+  enumConstants: string[];
 }
 
 /** A `@Confiqure.Tool`-annotated method discovered during the scan. */
@@ -286,6 +288,7 @@ function extractDeclaration(node: SyntaxNode): ParsedDecl | null {
 
   const body = node.childForFieldName("body");
   const fields: ParsedField[] = [];
+  const enumConstants: string[] = [];
   if (body && (kind === "class" || kind === "record")) {
     let pendingDoc: string | null = null;
     for (const child of body.namedChildren) {
@@ -301,8 +304,25 @@ function extractDeclaration(node: SyntaxNode): ParsedDecl | null {
       pendingDoc = null;
     }
   }
+  if (body && kind === "enum") {
+    // enum_body holds enum_constant nodes (grammar nests them under an
+    // enum_body_declarations-free list) — capture the closed value set so
+    // downstream schema/scaffold generation can emit real enums, not bare strings.
+    const walk = (n: SyntaxNode) => {
+      for (const child of n.namedChildren) {
+        if (!child) continue;
+        if (child.type === "enum_constant") {
+          const nameNode = child.childForFieldName("name");
+          if (nameNode) enumConstants.push(nameNode.text);
+        } else if (child.type !== "enum_body_declarations") {
+          walk(child);
+        }
+      }
+    };
+    walk(body);
+  }
 
-  return { kind, name, hasConfiqureAnnotation, fields };
+  return { kind, name, hasConfiqureAnnotation, fields, enumConstants };
 }
 
 function declarationHasConfiqure(node: SyntaxNode): boolean {
@@ -432,4 +452,47 @@ export function buildClassTrees(parsed: ParsedFile[]): BuildClassTreesResult {
   });
 
   return { trees };
+}
+
+/**
+ * Files reachable from TOOL signatures: each `@Confiqure.Tool` method's input
+ * DTO + return type, walked through the same field-type graph as endpoint
+ * roots. Without this, a tool input DTO living in its own file ships ONLY if
+ * some `@Confiqure` endpoint happens to reference it — and the Composer can't
+ * derive the tool's input schema from source it never received.
+ */
+export function collectToolReachableFiles(
+  parsed: ParsedFile[],
+  tools: ParsedTool[],
+): Set<string> {
+  const classNameToDecl = new Map<string, { file: string; decl: ParsedDecl }>();
+  for (const pf of parsed) {
+    for (const decl of pf.declarations) {
+      if (!classNameToDecl.has(decl.name)) {
+        classNameToDecl.set(decl.name, { file: pf.filePath, decl });
+      }
+    }
+  }
+
+  const reachable = new Set<string>();
+  const stack: string[] = [];
+  for (const t of tools) {
+    if (t.inputType) stack.push(t.inputType);
+    if (t.returnType) stack.push(t.returnType);
+  }
+  const visited = new Set<string>();
+  while (stack.length > 0) {
+    const className = stack.pop()!;
+    if (visited.has(className)) continue;
+    visited.add(className);
+    const found = classNameToDecl.get(className);
+    if (!found) continue; // non-project type (String, ResponseEntity, …)
+    reachable.add(found.file);
+    if (found.decl.kind === "class" || found.decl.kind === "record") {
+      for (const field of found.decl.fields) {
+        for (const t of field.typeNames) stack.push(t);
+      }
+    }
+  }
+  return reachable;
 }

@@ -161,6 +161,12 @@ function collectProjectTypes(typeText: string, declIndex: Map<string, ParsedDecl
 
 function renderInterface(decl: ParsedDecl, declIndex: Map<string, ParsedDecl>): string {
   if (decl.kind === "enum") {
+    // Real closed-set union when the scan captured the constants; string fallback
+    // for grammars/paths that didn't.
+    if (decl.enumConstants.length > 0) {
+      const union = decl.enumConstants.map((c) => `"${c}"`).join(" | ");
+      return `export type ${decl.name} = ${union}\n`;
+    }
     return `export type ${decl.name} = string\n`;
   }
   const lines: string[] = [`export interface ${decl.name} {`];

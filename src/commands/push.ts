@@ -193,6 +193,10 @@ export function registerPush(program: Command): void {
       // they're workspace-level context) so the backend/Composer can discover the
       // callback hook path wherever it lives — not only inside a scanned root/tool.
       for (const hf of scan.hookFiles) uploadSet.add(hf.filePath);
+      // And every file reachable from a TOOL signature (input DTO + return type
+      // graphs) — the Composer derives each tool's input schema from these; a DTO
+      // in its own file previously shipped only if an endpoint referenced it.
+      for (const f of scan.toolReachableFiles) uploadSet.add(f);
       const uploadPaths = Array.from(uploadSet).sort();
       const files: ManifestFileEntry[] = [];
       for (const path of uploadPaths) {
@@ -215,6 +219,15 @@ export function registerPush(program: Command): void {
         changes: diff.changes,
         files,
         toolFiles: toolFileEntries.length > 0 ? toolFileEntries : undefined,
+        tools: scan.tools.length > 0
+          ? scan.tools.map((t) => ({
+              name: t.name,
+              serverSide: t.serverSide,
+              inputType: t.inputType,
+              returnType: t.returnType,
+              doc: t.doc,
+            }))
+          : undefined,
       };
 
       // Ship only the files actually referenced by an annotated root + tool controllers.
@@ -430,6 +443,7 @@ function scopeToFile(scan: ScanResult, fileArg: string): void {
   scan.toolFiles = [];
   scan.hookFiles = [];
   scan.tools = [];
+  scan.toolReachableFiles = new Set();
 
   console.log(
     `${chalk.cyan("⏵")} ${chalk.bold("--file")}: scoped to ${roots.length} root${roots.length === 1 ? "" : "s"}` +

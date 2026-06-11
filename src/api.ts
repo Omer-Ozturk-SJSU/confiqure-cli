@@ -77,6 +77,19 @@ export interface ManifestFileEntry {
   sha: string;
 }
 
+/**
+ * Deterministic per-tool metadata from the tree-sitter scan. The backend treats
+ * `serverSide` here as AUTHORITATIVE over the Composer's model-extracted flag
+ * (a hallucinated flip would re-route a tool between HTTP and browser dispatch).
+ */
+export interface ManifestToolEntry {
+  name: string;
+  serverSide: boolean;
+  inputType: string | null;
+  returnType: string | null;
+  doc: string | null;
+}
+
 export interface Manifest {
   workspaceKey: string;
   gitRef: string;
@@ -85,6 +98,8 @@ export interface Manifest {
   changes: ChangeEntry[];
   files: ManifestFileEntry[];
   toolFiles?: ManifestFileEntry[];
+  /** Structured tool declarations (backward-compatible: absent on older CLIs). */
+  tools?: ManifestToolEntry[];
 }
 
 export class ApiError extends Error {
