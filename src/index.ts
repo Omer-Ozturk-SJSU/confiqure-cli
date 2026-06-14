@@ -12,6 +12,7 @@ import { registerPush } from "./commands/push.js";
 import { registerScaffold } from "./commands/scaffold.js";
 import { registerTools } from "./commands/tools.js";
 import { registerWorkspace } from "./commands/workspace.js";
+import { registerListen } from "./commands/listen.js";
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../package.json"), "utf8")
@@ -31,6 +32,7 @@ registerPush(program);
 registerScaffold(program);
 registerTools(program);
 registerWorkspace(program);
+registerListen(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   const msg = err instanceof Error ? err.message : String(err);
