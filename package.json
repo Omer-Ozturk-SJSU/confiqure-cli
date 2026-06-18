@@ -1,6 +1,6 @@
 {
   "name": "@confiqure/cli",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "confiqure.ai CLI — push @Confiqure-annotated classes to your workspace",
   "type": "module",
   "bin": {
@@ -9,6 +9,7 @@
   "main": "./dist/index.js",
   "scripts": {
     "build": "tsc",
+    "test": "vitest run",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "prepublishOnly": "npm run build"
@@ -51,6 +52,7 @@
     "@types/node": "^22.5.0",
     "@types/ws": "^8.18.1",
     "tsx": "^4.19.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "vitest": "^4.1.9"
   }
 }

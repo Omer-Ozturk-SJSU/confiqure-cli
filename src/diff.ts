@@ -27,12 +27,16 @@ export interface DiffResult {
  *   - Local annotated file not in registry → ADDED.
  *   - Matching classUniqueId, different gitSha → CHANGED.
  *   - Matching classUniqueId, same gitSha → unchanged (skipped).
- *   - Registry entry with no local match → DELETED.
+ *   - Registry entry with no local match → DELETED — but ONLY on a full sync.
+ *     A selective push (--file) narrows `local` to the targeted root(s), so
+ *     "absent locally" there does NOT mean "removed from source"; callers pass
+ *     {deletes:false} to keep selective pushes additive/update-only.
  *   - RENAMED detection deferred (treated as DELETED + ADDED).
  */
 export function diffAgainstRegistry(
   local: DiscoveredClass[],
-  registry: RegistryItem[]
+  registry: RegistryItem[],
+  opts: { deletes?: boolean } = {}
 ): DiffResult {
   const byClassId = new Map(registry.map((r) => [r.classUniqueId, r]));
   const changes: ChangeEntry[] = [];
@@ -65,16 +69,21 @@ export function diffAgainstRegistry(
     }
   }
 
-  for (const r of registry) {
-    if (!seen.has(r.classUniqueId)) {
-      changes.push({
-        op: "DELETED",
-        classUniqueId: r.classUniqueId,
-        className: r.className,
-        configEnd: r.configEnd,
-        filePath: r.filePath ?? r.classUniqueId,
-        gitSha: r.gitVersion,
-      });
+  // Deletions are a FULL-SYNC concept (a registry root no longer present in source).
+  // Skipped when {deletes:false} — a selective (--file) push must never delete the
+  // non-targeted roots it simply didn't scan.
+  if (opts.deletes !== false) {
+    for (const r of registry) {
+      if (!seen.has(r.classUniqueId)) {
+        changes.push({
+          op: "DELETED",
+          classUniqueId: r.classUniqueId,
+          className: r.className,
+          configEnd: r.configEnd,
+          filePath: r.filePath ?? r.classUniqueId,
+          gitSha: r.gitVersion,
+        });
+      }
     }
   }
 

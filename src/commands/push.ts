@@ -123,7 +123,18 @@ export function registerPush(program: Command): void {
         );
       } else {
         const registry = await getRegistry(creds, targetWorkspaceKey);
-        diff = diffAgainstRegistry(scan.annotated, registry);
+        // Selective (--file) push is additive/update-only: tell the diff NOT to
+        // compute deletions, so non-targeted roots (absent from the narrowed local
+        // set) are never marked DELETED. A full push keeps deletes — it sees every root.
+        diff = diffAgainstRegistry(scan.annotated, registry, { deletes: !opts.file });
+      }
+
+      // Defense-in-depth: a --file push must NEVER ship a DELETED for a root the dev
+      // didn't target (that would tell the backend to wipe untouched endpoints).
+      // diffAgainstRegistry already skips deletes in selective mode; this guarantees
+      // it even if that path ever regresses.
+      if (opts.file) {
+        diff.changes = diff.changes.filter((c) => c.op !== "DELETED");
       }
 
       console.log();
@@ -135,6 +146,14 @@ export function registerPush(program: Command): void {
       );
 
       if (diff.changes.length === 0) {
+        if (opts.file) {
+          console.log();
+          console.log(
+            chalk.yellow("Nothing to push:"),
+            `the selected root${scan.annotated.length === 1 ? " is" : "s are"} already up to date. ` +
+              `Use ${chalk.cyan("--file <path> --force")} to re-push anyway.`
+          );
+        }
         return;
       }
 
@@ -446,9 +465,11 @@ function scopeToFile(scan: ScanResult, fileArg: string): void {
   scan.toolReachableFiles = new Set();
 
   console.log(
-    `${chalk.cyan("⏵")} ${chalk.bold("--file")}: scoped to ${roots.length} root${roots.length === 1 ? "" : "s"}` +
-      ` (${roots.map((r) => r.className).join(", ")}), ${reachable.size} file${reachable.size === 1 ? "" : "s"}.`
+    `${chalk.cyan("⏵")} ${chalk.bold("--file")} ${fileArg}: matched ${roots.length} root${roots.length === 1 ? "" : "s"}, ${reachable.size} file${reachable.size === 1 ? "" : "s"}:`
   );
+  for (const r of roots) {
+    console.log(`    ${chalk.bold(r.className)}  ${chalk.dim(r.filePath)}`);
+  }
 }
 
 /**
