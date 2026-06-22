@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { extname, basename } from "node:path";
 import { ProjectConfig } from "./config.js";
 import { gitHashObject } from "./git.js";
+import { endpointIdentity } from "./identity.js";
 import {
   parseJavaFiles,
   buildClassTrees,
@@ -166,7 +167,16 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
     const content = allFiles.get(tree.rootFile) ?? "";
     const className = tree.rootClass;
     const configEnd = extractEnd(content) ?? DEFAULT_ENDPOINT;
-    const gitSha = await gitHashObject(tree.rootFile, cwd).catch(() => "");
+    // #40: the endpoint identity must cover its FULL nested type graph (root + every reachable
+    // DTO), not just the root file — otherwise a change confined to a nested DTO leaves the root
+    // byte-identical, the diff reports UNCHANGED, and no new schema version is cut (host ⇄ confiqure
+    // drift). Hash every reachable file's blob SHA; a single-file endpoint keeps its plain blob SHA
+    // (endpointIdentity), so only endpoints that actually have nested types re-version once.
+    const reach = Array.from(new Set<string>([tree.rootFile, ...tree.reachableFiles]));
+    const fileShas = await Promise.all(
+      reach.map(async (p) => ({ path: p, sha: await gitHashObject(p, cwd).catch(() => "") }))
+    );
+    const gitSha = endpointIdentity(fileShas);
     annotated.push({
       classUniqueId: tree.rootFile,
       className,
