@@ -54,6 +54,8 @@ export interface ParsedField {
   doc: string | null;
   /** True if `doc` contains an `@confiqure` tag. */
   hasConfiqureTag: boolean;
+  /** Raw initializer expression (right of `=`), e.g. "FloorMethod.MARGIN_PERCENT"; null if none. */
+  initializer: string | null;
 }
 
 export interface ParsedDecl {
@@ -63,6 +65,19 @@ export interface ParsedDecl {
   fields: ParsedField[];
   /** Enum constants (kind === "enum" only) — closed-set values for typed schemas/scaffolds. */
   enumConstants: string[];
+}
+
+/**
+ * Every enum declaration in a file, INCLUDING nested ones — flattened with the chain of enclosing
+ * type names so a consumer can reason about Java scoping (an inner enum shadows a same-named
+ * top-level twin). Separate from {@link ParsedDecl} (which holds only top-level types) so the
+ * reachability walk is untouched. Powers the push-time lint for same-name/divergent enums.
+ */
+export interface EnumDecl {
+  name: string;
+  constants: string[];
+  /** Enclosing type names, outermost-first; empty for a top-level enum. */
+  enclosingTypes: string[];
 }
 
 /** A `@Confiqure.Tool`-annotated method discovered during the scan. */
@@ -86,6 +101,8 @@ export interface ParsedFile {
   packageName: string | null;
   declarations: ParsedDecl[];
   tools: ParsedTool[];
+  /** Every enum in the file, including nested ones, with their enclosing-type chain (lint input). */
+  enums: EnumDecl[];
 }
 
 export interface ClassTree {
@@ -152,7 +169,56 @@ function extractFile(filePath: string, root: SyntaxNode): ParsedFile {
     }
   }
 
-  return { filePath, packageName, declarations, tools };
+  // Separate pass for the full enum graph (nested enums too) — purely additive, does not touch
+  // declarations/tools above, so the reachability walk is unchanged.
+  const enums: EnumDecl[] = [];
+  collectEnums(root, [], enums);
+
+  return { filePath, packageName, declarations, tools, enums };
+}
+
+/**
+ * Walk a node's type-declaration descendants, recording every enum (top-level or nested) with the
+ * chain of enclosing type names. Recurses only through type bodies — enums can't be declared
+ * outside a type — so each enum is recorded exactly once.
+ */
+function collectEnums(node: SyntaxNode, enclosing: string[], out: EnumDecl[]): void {
+  for (const child of node.namedChildren) {
+    if (!child) continue;
+    if (child.type === "enum_declaration") {
+      const name = child.childForFieldName("name")?.text ?? "";
+      const body = child.childForFieldName("body");
+      out.push({ name, constants: extractEnumConstants(body), enclosingTypes: [...enclosing] });
+      if (body) collectEnums(body, [...enclosing, name], out); // enums may nest further types
+    } else if (
+      child.type === "class_declaration" ||
+      child.type === "interface_declaration" ||
+      child.type === "record_declaration"
+    ) {
+      const name = child.childForFieldName("name")?.text ?? "";
+      const body = child.childForFieldName("body");
+      if (body) collectEnums(body, [...enclosing, name], out);
+    }
+  }
+}
+
+/** Closed value set of an enum body (the `enum_constant` names), ignoring any method members. */
+function extractEnumConstants(body: SyntaxNode | null): string[] {
+  if (!body) return [];
+  const constants: string[] = [];
+  const walk = (n: SyntaxNode) => {
+    for (const child of n.namedChildren) {
+      if (!child) continue;
+      if (child.type === "enum_constant") {
+        const nameNode = child.childForFieldName("name");
+        if (nameNode) constants.push(nameNode.text);
+      } else if (child.type !== "enum_body_declarations") {
+        walk(child);
+      }
+    }
+  };
+  walk(body);
+  return constants;
 }
 
 /** Scan a type declaration's body for `@Confiqure.Tool`-annotated methods. */
@@ -305,21 +371,8 @@ function extractDeclaration(node: SyntaxNode): ParsedDecl | null {
     }
   }
   if (body && kind === "enum") {
-    // enum_body holds enum_constant nodes (grammar nests them under an
-    // enum_body_declarations-free list) — capture the closed value set so
-    // downstream schema/scaffold generation can emit real enums, not bare strings.
-    const walk = (n: SyntaxNode) => {
-      for (const child of n.namedChildren) {
-        if (!child) continue;
-        if (child.type === "enum_constant") {
-          const nameNode = child.childForFieldName("name");
-          if (nameNode) enumConstants.push(nameNode.text);
-        } else if (child.type !== "enum_body_declarations") {
-          walk(child);
-        }
-      }
-    };
-    walk(body);
+    // Closed value set for downstream schema/scaffold generation (real enums, not bare strings).
+    enumConstants.push(...extractEnumConstants(body));
   }
 
   return { kind, name, hasConfiqureAnnotation, fields, enumConstants };
@@ -364,6 +417,7 @@ function extractFields(fieldDecl: SyntaxNode, doc: string | null): ParsedField[]
       typeNames,
       doc,
       hasConfiqureTag: doc != null && /@confiqure\b/i.test(doc),
+      initializer: child.childForFieldName("value")?.text ?? null,
     });
   }
   return out;

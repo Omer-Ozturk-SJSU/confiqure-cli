@@ -12,6 +12,7 @@ import {
   ClassTree,
   ParsedTool,
 } from "./classTree.js";
+import { lintBundle } from "./lint.js";
 
 export interface DiscoveredClass {
   /** Stable identity. V1: relative file path. */
@@ -160,6 +161,12 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
     }
     for (const f of collectToolReachableFiles(parsed, tools)) {
       toolReachableFiles.add(f);
+    }
+
+    // Push-time lint (#83): warn on simple-name enum collisions / bad enum defaults the host can't
+    // see but a name-based resolver trips over. Advisory only — never blocks the push.
+    for (const warning of lintBundle(parsed)) {
+      console.warn(chalk.yellow("⚠"), warning);
     }
   }
 
