@@ -98,13 +98,24 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
 
   const ignorePatterns = config.ignore.map((d) => `**/${d}/**`);
 
-  const files = await fastGlob(patterns, {
+  const globbed = await fastGlob(patterns, {
     cwd,
     ignore: ignorePatterns,
     absolute: false,
     onlyFiles: true,
     dot: false,
   });
+
+  // #141: never scan test sources. Test classes are never config endpoints, yet they leaked into
+  // the upload bundle (a `*Test` referencing `@Tool` tripped the tool-file substring check) and
+  // then into every endpoint's nested map — ~25k tokens of noise per chat turn. Drop them here so
+  // they never enter reachability, upload, or the nested map. Matches the Maven/Gradle `src/test/`
+  // convention (not a bare `/test/`, which would wrongly catch a legitimate `test/` config domain).
+  const files = globbed.filter((p) => !isTestPath(p));
+  const droppedTests = globbed.length - files.length;
+  if (droppedTests > 0) {
+    console.log(chalk.dim(`Excluded ${droppedTests} test source${droppedTests === 1 ? "" : "s"} (src/test/) from the scan.`));
+  }
 
   const allFiles = new Map<string, string>();
   const fileLanguage = new Map<string, string>();
@@ -248,6 +259,16 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
   }
 
   return { annotated, toolFiles, hookFiles, tools, allFiles, primaryLanguage, reachableFiles, toolReachableFiles };
+}
+
+/**
+ * A Maven/Gradle test-source path (`.../src/test/...`). Normalizes Windows separators first.
+ * Deliberately anchored to `src/test/` — a bare `/test/` segment would wrongly exclude a
+ * legitimate config domain a host happens to call "test".
+ */
+export function isTestPath(filePath: string): boolean {
+  const norm = filePath.replace(/\\/g, "/");
+  return norm.includes("/src/test/") || norm.startsWith("src/test/");
 }
 
 function fileHasConfiqureTool(declarations: import("./classTree.js").ParsedDecl[], source: string): boolean {

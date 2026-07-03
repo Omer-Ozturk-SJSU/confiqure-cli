@@ -21,7 +21,32 @@ export function lintBundle(parsed: ParsedFile[]): string[] {
 
   warnings.push(...divergentSameNameEnums(enums));
   warnings.push(...defaultsReferencingAbsentConstant(parsed, enums));
+  warnings.push(...endpointExtendsMissingBase(parsed));
   return warnings;
+}
+
+/**
+ * (#140) A `@Confiqure` endpoint that `extends` a base whose source isn't in this push. The scan
+ * follows `extends`, but only into files it can see — a base outside the configured scanPaths is
+ * silently dropped, so its inherited config fields never reach the chat model OR the save/complete
+ * gates. Warn so the developer widens scanPaths rather than shipping a half-visible endpoint.
+ */
+function endpointExtendsMissingBase(parsed: ParsedFile[]): string[] {
+  const known = new Set<string>();
+  for (const pf of parsed) for (const d of pf.declarations) known.add(d.name);
+  const out: string[] = [];
+  for (const pf of parsed) {
+    for (const d of pf.declarations) {
+      if (!d.hasConfiqureAnnotation || !d.superclassName) continue;
+      if (known.has(d.superclassName)) continue;
+      out.push(
+        `@Confiqure class ${d.name} extends ${d.superclassName}, but ${d.superclassName}'s source ` +
+          `isn't in this push — its inherited fields will be invisible to the chat and the ` +
+          `save/complete gates. Make sure ${d.superclassName} is under a scanPath.`
+      );
+    }
+  }
+  return out;
 }
 
 /** (a) Same simple name, different constants — the simple-name collision that breaks resolution. */

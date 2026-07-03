@@ -489,6 +489,7 @@ function forceAllChanged(annotated: DiscoveredClass[]): DiffResult {
     configEnd: c.configEnd,
     filePath: c.filePath,
     gitSha: c.gitSha,
+    relatedFiles: c.relatedFiles,
   }));
   return { changes, unchanged: 0 };
 }

@@ -63,6 +63,19 @@ export interface ParsedDecl {
   name: string;
   hasConfiqureAnnotation: boolean;
   fields: ParsedField[];
+  /**
+   * Ancestor type names from `extends`/`implements` (#140). Superclass fields are part of the
+   * config — a subclass endpoint inherits the base's core — so the reachability walk must follow
+   * these exactly like field types (non-project ancestors fall away via the class index, same as
+   * framework field types). Unwrapped identifiers, so `extends Base<Foo>` yields ["Base", "Foo"].
+   */
+  superTypes: string[];
+  /**
+   * The single `extends` superclass simple name (classes only; null for interfaces/records/no-extends).
+   * Separate from {@link superTypes} — the push-lint warns when a `@Confiqure` root extends a base
+   * whose source is absent from the bundle (inherited fields would be silently invisible, #140).
+   */
+  superclassName: string | null;
   /** Enum constants (kind === "enum" only) — closed-set values for typed schemas/scaffolds. */
   enumConstants: string[];
 }
@@ -356,6 +369,8 @@ function extractDeclaration(node: SyntaxNode): ParsedDecl | null {
   const name = nameNode.text;
 
   const hasConfiqureAnnotation = declarationHasConfiqure(node);
+  const superTypes = extractSuperTypes(node);
+  const superclassName = extractSuperclassName(node);
 
   const body = node.childForFieldName("body");
   const fields: ParsedField[] = [];
@@ -380,7 +395,43 @@ function extractDeclaration(node: SyntaxNode): ParsedDecl | null {
     enumConstants.push(...extractEnumConstants(body));
   }
 
-  return { kind, name, hasConfiqureAnnotation, fields, enumConstants };
+  return { kind, name, hasConfiqureAnnotation, fields, superTypes, superclassName, enumConstants };
+}
+
+/**
+ * The single `extends` superclass's simple name from the {@code superclass} clause (the first type
+ * identifier, so {@code extends Base<Foo>} → "Base"). Null when there's no {@code extends} (records,
+ * interfaces, and classes with only {@code implements}). Powers the missing-base push-lint (#140).
+ */
+function extractSuperclassName(node: SyntaxNode): string | null {
+  for (const child of node.namedChildren) {
+    if (child && child.type === "superclass") {
+      const ids = collectTypeIdentifiers(child);
+      return ids.length > 0 ? ids[0] : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Ancestor type identifiers declared on a type: the `extends` superclass and every
+ * `implements`/`extends` interface (#140). Grammar-version-resilient — we match the wrapper
+ * nodes tree-sitter-java uses for the clause (`superclass`, `super_interfaces` on classes/records;
+ * `extends_interfaces` on interfaces) and reuse {@link collectTypeIdentifiers} to unwrap generics.
+ */
+function extractSuperTypes(node: SyntaxNode): string[] {
+  const out = new Set<string>();
+  for (const child of node.namedChildren) {
+    if (!child) continue;
+    if (
+      child.type === "superclass" ||
+      child.type === "super_interfaces" ||
+      child.type === "extends_interfaces"
+    ) {
+      for (const t of collectTypeIdentifiers(child)) out.add(t);
+    }
+  }
+  return [...out];
 }
 
 function declarationHasConfiqure(node: SyntaxNode): boolean {
@@ -495,6 +546,10 @@ export function buildClassTrees(parsed: ParsedFile[]): BuildClassTreesResult {
       if (reachableFiles.has(found.file)) continue;
       reachableFiles.add(found.file);
       visitedClasses.push(className);
+      // Ancestors first (#140): a subclass endpoint inherits the base's config fields, so the
+      // base source AND its referenced types must ship. Walked for every kind (interfaces
+      // `extends` interfaces; records `implements`).
+      for (const t of found.decl.superTypes) stack.push(t);
       if (found.decl.kind === "class" || found.decl.kind === "record") {
         for (const field of found.decl.fields) {
           for (const t of field.typeNames) stack.push(t);
@@ -547,6 +602,7 @@ export function collectToolReachableFiles(
     const found = classNameToDecl.get(className);
     if (!found) continue; // non-project type (String, ResponseEntity, …)
     reachable.add(found.file);
+    for (const t of found.decl.superTypes) stack.push(t); // #140: follow a tool DTO's ancestors too
     if (found.decl.kind === "class" || found.decl.kind === "record") {
       for (const field of found.decl.fields) {
         for (const t of field.typeNames) stack.push(t);

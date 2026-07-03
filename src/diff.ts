@@ -12,6 +12,13 @@ export interface ChangeEntry {
   previousFilePath?: string;
   previousClassUniqueId?: string;
   gitSha: string;
+  /**
+   * This endpoint's transitive reachable files (root + field-type + ancestor closure), so the
+   * backend can store a PER-ENDPOINT nested map instead of one shared batch-wide kitchen-sink
+   * (#141). Absent on DELETED entries and on older manifests — the backend falls back to the
+   * legacy batch-wide behavior when this is missing.
+   */
+  relatedFiles?: string[];
 }
 
 export interface DiffResult {
@@ -54,6 +61,7 @@ export function diffAgainstRegistry(
         configEnd: cls.configEnd,
         filePath: cls.filePath,
         gitSha: cls.gitSha,
+        relatedFiles: cls.relatedFiles,
       });
     } else if (existing.gitVersion !== cls.gitSha) {
       changes.push({
@@ -63,6 +71,7 @@ export function diffAgainstRegistry(
         configEnd: cls.configEnd,
         filePath: cls.filePath,
         gitSha: cls.gitSha,
+        relatedFiles: cls.relatedFiles,
       });
     } else {
       unchanged++;

@@ -75,3 +75,39 @@ describe("lintBundle (#83 — simple-name enum collisions + bad enum defaults)",
     expect(await lint({ "Cfg.java": src })).toEqual([]);
   });
 });
+
+describe("lintBundle (#140 — @Confiqure root extends a base absent from the push)", () => {
+  it("warns when the base class source isn't in the bundle", async () => {
+    const warnings = await lint({
+      "AsinDiscovery.java": `@ai.confiqure.annotation.Confiqure
+        public class AsinDiscovery extends Discovery { private String extra; }`,
+      // Discovery.java is intentionally NOT in the bundle (out of scanPaths).
+    });
+    expect(warnings.some((w) =>
+      w.includes("AsinDiscovery extends Discovery") && w.includes("isn't in this push"))).toBe(true);
+  });
+
+  it("is silent when the base IS in the bundle", async () => {
+    const warnings = await lint({
+      "AsinDiscovery.java": `@ai.confiqure.annotation.Confiqure
+        public class AsinDiscovery extends Discovery { private String extra; }`,
+      "Discovery.java": `public class Discovery { private Integer minSalesRank; }`,
+    });
+    expect(warnings.some((w) => w.includes("isn't in this push"))).toBe(false);
+  });
+
+  it("does not warn for a non-@Confiqure class extending an absent base", async () => {
+    const warnings = await lint({
+      "Helper.java": `public class Helper extends SomeLibraryBase { private String x; }`,
+    });
+    expect(warnings.some((w) => w.includes("isn't in this push"))).toBe(false);
+  });
+
+  it("does not warn on `implements` (only `extends` carries invisible instance fields)", async () => {
+    const warnings = await lint({
+      "Root.java": `@ai.confiqure.annotation.Confiqure
+        public class Root implements java.io.Serializable { private String x; }`,
+    });
+    expect(warnings.some((w) => w.includes("isn't in this push"))).toBe(false);
+  });
+});
