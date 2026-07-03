@@ -429,10 +429,16 @@ async function runPromote(
  * recorded, a path suffix (`restocker/Supplier.java`), a bare filename
  * (`Supplier.java`), or an absolute path. If <path> isn't itself a root but is
  * a nested file some root reaches, we push the owning root(s) so the nested
- * edit propagates. Tool controllers are dropped — a selective push is
- * endpoint-focused.
+ * edit propagates.
+ *
+ * #120: `toolFiles`/`tools`/`toolReachableFiles`/`hookFiles` are NOT narrowed
+ * here. Tools are workspace-level, not per-endpoint — reachability is
+ * directional (DTOs never reference controllers), so a tool controller is
+ * outside every endpoint root's relatedFiles and a naive scope-to-root would
+ * silently drop every tool from a selective push. The full-tree scan already
+ * found them; leave them as-is so the sweep always ships regardless of `--file`.
  */
-function scopeToFile(scan: ScanResult, fileArg: string): void {
+export function scopeToFile(scan: ScanResult, fileArg: string): void {
   const norm = (p: string) => p.replace(/\\/g, "/");
   const target = norm(fileArg);
   const matches = (filePath: string): boolean => {
@@ -459,10 +465,6 @@ function scopeToFile(scan: ScanResult, fileArg: string): void {
 
   scan.annotated = roots;
   scan.reachableFiles = reachable;
-  scan.toolFiles = [];
-  scan.hookFiles = [];
-  scan.tools = [];
-  scan.toolReachableFiles = new Set();
 
   console.log(
     `${chalk.cyan("⏵")} ${chalk.bold("--file")} ${fileArg}: matched ${roots.length} root${roots.length === 1 ? "" : "s"}, ${reachable.size} file${reachable.size === 1 ? "" : "s"}:`
