@@ -85,6 +85,7 @@ export interface ManifestFileEntry {
 export interface ManifestToolEntry {
   name: string;
   serverSide: boolean;
+  async: boolean;
   inputType: string | null;
   returnType: string | null;
   doc: string | null;

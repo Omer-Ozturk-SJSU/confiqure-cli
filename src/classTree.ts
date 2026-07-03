@@ -86,6 +86,8 @@ export interface ParsedTool {
   name: string;
   /** From the `serverSide` arg; defaults to true. */
   serverSide: boolean;
+  /** From the `async` arg; defaults to false. Server-side only → SERVER_ASYNC dispatch. */
+  async: boolean;
   /** The `@RequestBody` param type (or first param type) — the input DTO. */
   inputType: string | null;
   /** Method return type. */
@@ -253,10 +255,13 @@ function extractToolFromMethod(method: SyntaxNode, doc: string | null, filePath:
   const serverSideRaw = annotationRawArg(ann, "serverSide");
   const serverSide = serverSideRaw == null ? true : serverSideRaw.trim() === "true";
 
+  const asyncRaw = annotationRawArg(ann, "async");
+  const isAsync = asyncRaw == null ? false : asyncRaw.trim() === "true";
+
   const returnType = method.childForFieldName("type")?.text ?? null;
   const inputType = extractInputType(method);
 
-  return { name, serverSide, inputType, returnType, doc, sourceFile: filePath };
+  return { name, serverSide, async: isAsync, inputType, returnType, doc, sourceFile: filePath };
 }
 
 /** Find an `@Confiqure.Tool` / `@Tool` annotation on a method's modifiers. */

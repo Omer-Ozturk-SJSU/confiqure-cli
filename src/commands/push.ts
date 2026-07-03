@@ -242,6 +242,7 @@ export function registerPush(program: Command): void {
           ? scan.tools.map((t) => ({
               name: t.name,
               serverSide: t.serverSide,
+              async: t.async,
               inputType: t.inputType,
               returnType: t.returnType,
               doc: t.doc,

@@ -54,7 +54,9 @@ export function registerListen(program: Command): void {
           } catch {
             return;
           }
-          const url = localUrl(forwardBase, frame.payload?.path);
+          // v2: the route rides the X-Confiqure-Tool-Path header (the body is now the clean DTO the
+          // host binds with @RequestBody). Fall back to the legacy payload.path for older frames.
+          const url = localUrl(forwardBase, frame.headers?.["X-Confiqure-Tool-Path"] ?? frame.payload?.path);
           const label = frame.payload?.toolName ?? frame.payload?.event ?? frame.kind;
           console.log(chalk.cyan("→"), `${frame.kind}  ${chalk.bold(String(label))}  →  ${url}`);
           // Prefer the exact bytes confiqure signed (rawBody) + the forwarded headers
