@@ -184,7 +184,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
   for (const tree of javaTrees) {
     const content = allFiles.get(tree.rootFile) ?? "";
     const className = tree.rootClass;
-    const configEnd = extractEnd(content) ?? DEFAULT_ENDPOINT;
+    const configEnd = resolveConfigEnd(content, className);
     // #40: the endpoint identity must cover its FULL nested type graph (root + every reachable
     // DTO), not just the root file — otherwise a change confined to a nested DTO leaves the root
     // byte-identical, the diff reports UNCHANGED, and no new schema version is cut (host ⇄ confiqure
@@ -217,7 +217,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
 
     const ext = extname(filePath);
     const className = basename(filePath, ext);
-    const configEnd = extractEnd(content) ?? DEFAULT_ENDPOINT;
+    const configEnd = resolveConfigEnd(content, className);
     const gitSha = await gitHashObject(filePath, cwd).catch(() => "");
     annotated.push({
       classUniqueId: filePath,
@@ -243,6 +243,22 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
       max = n;
       primaryLanguage = lang;
     }
+  }
+
+  // #316 — surface recognized user-facts contracts so the developer can see the declaration took
+  // effect (and at which reserved address) instead of wondering why it isn't in the endpoint list.
+  const factsClasses = annotated.filter((c) => isFactsClass(allFiles.get(c.filePath) ?? ""));
+  for (const f of factsClasses) {
+    console.log(
+      chalk.dim(`User-facts contract: ${f.className} → ${f.configEnd} (read-only, not a chat endpoint)`)
+    );
+  }
+  if (factsClasses.length > 1) {
+    console.warn(
+      chalk.yellow("⚠"),
+      `${factsClasses.length} classes declare \`type = FACTS\`, but a workspace has ONE user-facts ` +
+        `contract — the most recently pushed one wins. Classes: ${factsClasses.map((c) => c.className).join(", ")}`
+    );
   }
 
   // A workspace can have only ONE default endpoint. A bare `@Confiqure` (no `end`) resolves
@@ -290,4 +306,64 @@ const DEFAULT_ENDPOINT = "/";
 function extractEnd(source: string): string | null {
   const m = source.match(/\b[Ee]nd\s*[:=]\s*["']([^"']+)["']/);
   return m ? m[1] : null;
+}
+
+/**
+ * The parenthesized arguments of the CLASS-level `@Confiqure(...)`, or null when the class is
+ * unannotated or uses the bare marker form. Balanced-paren scan so a nested call or an array
+ * argument doesn't truncate it. Member annotations (`@Confiqure.Tool(`, `@Confiqure.Gate(`) are
+ * not matched — the pattern requires `(` directly after the name.
+ */
+export function confiqureArgs(source: string): string | null {
+  const at = source.search(/@Confiqure\s*\(/);
+  if (at < 0) return null;
+  const open = source.indexOf("(", at);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === "(") depth++;
+    else if (source[i] === ")") {
+      depth--;
+      if (depth === 0) return source.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+
+/**
+ * #316 — is this the host's USER-FACTS contract (`@Confiqure(type = FACTS, callback = "...")`)?
+ * Accepts every spelling the annotation admits across languages: `Confiqure.Type.FACTS`,
+ * `Type.FACTS`, a static-imported bare `FACTS`, and the quoted `"facts"` the non-Java sources use.
+ * Scoped to the annotation's own arguments so an ordinary `this.type = ...` in the class body can
+ * never be mistaken for a declaration.
+ */
+export function isFactsClass(source: string): boolean {
+  const args = confiqureArgs(source);
+  if (!args) return false;
+  const m = args.match(/\btype\s*[:=]\s*["']?([\w.$]+)["']?/);
+  if (!m) return false;
+  const last = m[1].split(".").pop() ?? "";
+  return last.toUpperCase() === "FACTS";
+}
+
+/**
+ * The reserved address of a FACTS class. A facts DTO is NOT a chat endpoint and normally carries no
+ * `end`, and an end-less class otherwise resolves to `"/"` — the workspace's DEFAULT endpoint. So
+ * without its own address a pushed facts contract would silently REPLACE the router. `/facts/<snake
+ * case class name>` is deterministic, collision-free with real endpoints, and self-describing in
+ * logs. An explicitly declared `end` still wins (the developer asked for it).
+ */
+export function factsEndpoint(className: string): string {
+  const snake = className
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
+  return `/facts/${snake || "user_facts"}`;
+}
+
+/** Resolved address for one scanned root: declared `end` → FACTS reserved address → default "/". */
+function resolveConfigEnd(source: string, className: string): string {
+  const declared = extractEnd(source);
+  if (declared) return declared;
+  return isFactsClass(source) ? factsEndpoint(className) : DEFAULT_ENDPOINT;
 }
