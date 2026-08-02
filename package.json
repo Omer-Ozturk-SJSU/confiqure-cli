@@ -4,7 +4,7 @@
   "description": "confiqure.ai CLI — push @Confiqure-annotated classes to your workspace",
   "type": "module",
   "bin": {
-    "confiqure": "./dist/index.js"
+    "confiqure": "dist/index.js"
   },
   "main": "./dist/index.js",
   "scripts": {
