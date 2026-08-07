@@ -77,6 +77,96 @@ export interface ManifestFileEntry {
   sha: string;
 }
 
+// ── User guides (#316 P2) ──────────────────────────────────────────────────
+
+/** One synced guide as the backend holds it — `contentSha` is the delta comparand. */
+export interface GuideRegistryItem {
+  docId: string;
+  sourcePath: string;
+  filename: string;
+  contentSha: string | null;
+  sizeBytes: number | null;
+  status: "ANALYSING" | "READY" | "FAILED";
+  searchable: boolean;
+  error: string | null;
+  createdAt: string;
+}
+
+export interface GuideSyncItem {
+  sourcePath: string;
+  status: "ACCEPTED" | "UNCHANGED" | "RETIRED" | "REJECTED";
+  docId: string | null;
+  error: string | null;
+}
+
+export interface GuideSyncResponse {
+  workspaceKey: string;
+  accepted: number;
+  unchanged: number;
+  retired: number;
+  rejected: number;
+  items: GuideSyncItem[];
+}
+
+/** The guide registry `confiqure push` diffs its local guides scan against. */
+export async function getGuideRegistry(
+  creds: Credentials,
+  targetWorkspaceKey?: string
+): Promise<GuideRegistryItem[]> {
+  const wsKey = targetWorkspaceKey ?? creds.workspaceKey;
+  const res = await fetch(
+    `${creds.apiBase}/api/${wsKey}/guides`,
+    { headers: { Authorization: `Bearer ${creds.token}` } }
+  );
+  if (!res.ok) {
+    throw new ApiError(res.status, `GET /guides failed: ${res.status} ${await res.text()}`);
+  }
+  return (await res.json()) as GuideRegistryItem[];
+}
+
+/**
+ * Ship the guide delta. `paths` is the FULL local set (it drives retirement
+ * server-side); `files` is only what changed, with the bytes riding as
+ * `files` parts keyed by the URL-encoded path — the same encoding /upload uses
+ * so directory separators survive the multipart parser.
+ */
+export async function postGuides(
+  creds: Credentials,
+  paths: string[],
+  files: Array<{ path: string; sha: string; sizeBytes: number; bytes: Uint8Array }>,
+  targetWorkspaceKey?: string
+): Promise<GuideSyncResponse> {
+  const form = new FormData();
+  form.append(
+    "manifest",
+    JSON.stringify({
+      paths,
+      files: files.map((f) => ({ path: f.path, sha: f.sha, sizeBytes: f.sizeBytes })),
+    })
+  );
+  for (const f of files) {
+    // Copy into a fresh ArrayBuffer: a Node Buffer is a view into a shared pool,
+    // so handing it straight to Blob can ship a neighbouring file's bytes.
+    const view = new Uint8Array(f.bytes.byteLength);
+    view.set(f.bytes);
+    form.append("files", new Blob([view]), encodeURIComponent(f.path));
+  }
+
+  const wsKey = targetWorkspaceKey ?? creds.workspaceKey;
+  const res = await fetch(
+    `${creds.apiBase}/api/${wsKey}/guides`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${creds.token}` },
+      body: form,
+    }
+  );
+  if (!res.ok) {
+    throw new ApiError(res.status, `POST /guides failed: ${res.status} ${await res.text()}`);
+  }
+  return (await res.json()) as GuideSyncResponse;
+}
+
 /**
  * Deterministic per-tool metadata from the tree-sitter scan. The backend treats
  * `serverSide` here as AUTHORITATIVE over the Composer's model-extracted flag

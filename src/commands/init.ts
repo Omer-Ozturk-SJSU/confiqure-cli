@@ -40,6 +40,10 @@ export function registerInit(program: Command): void {
           message: "Scan paths (comma-separated globs):",
           default: existing.scanPaths.join(", "),
         });
+        const guidesRaw = await input({
+          message: "User-guide folders to keep in sync (comma-separated, blank for none):",
+          default: (existing.guides ?? []).join(", "),
+        });
         const ignoreRaw = await input({
           message: "Directories to ignore (comma-separated):",
           default: existing.ignore.join(", "),
@@ -47,6 +51,7 @@ export function registerInit(program: Command): void {
         config = {
           ...existing,
           scanPaths: scanPathsRaw.split(",").map((s) => s.trim()).filter(Boolean),
+          guides: guidesRaw.split(",").map((s) => s.trim()).filter(Boolean),
           ignore: ignoreRaw.split(",").map((s) => s.trim()).filter(Boolean),
         };
       }
@@ -54,7 +59,20 @@ export function registerInit(program: Command): void {
       await saveConfig(cwd, config);
       console.log(chalk.green("✓"), `Wrote ${path}`);
       console.log(chalk.dim(`  scanPaths: ${config.scanPaths.join(", ")}`));
+      console.log(
+        chalk.dim(
+          `  guides: ${config.guides.length > 0 ? config.guides.join(", ") : "(none)"}`
+        )
+      );
       console.log(chalk.dim(`  ignore: ${config.ignore.join(", ")}`));
       console.log(chalk.dim(`  languages: ${Object.keys(config.languages).join(", ")}`));
+      if (config.guides.length > 0) {
+        console.log(
+          chalk.dim(
+            `  Drop .md/.html/.pdf/.txt pages and screenshots in ${config.guides[0]} — ` +
+              `confiqure push keeps them in sync and the chat answers how-to questions from them.`
+          )
+        );
+      }
     });
 }

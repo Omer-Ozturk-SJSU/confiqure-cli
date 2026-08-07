@@ -48,12 +48,37 @@ V1 ships tree-sitter parsing for **Java**. The other 8 languages (Kotlin, Scala,
 ```json
 {
   "scanPaths": ["src/main/java"],
+  "guides": ["docs/user-guides"],
   "ignore": ["target", ".git", ".idea"],
   "languages": {
     "java": { "extensions": [".java"], "tokenPattern": "@Confiqure" }
   }
 }
 ```
+
+## User guides
+
+`guides` marks the folders holding your product's own documentation. On every
+full `confiqure push` the CLI hashes each guide file, uploads only what changed,
+and tells the backend the full local list so a page you deleted in git is retired
+server-side. **Git stays the version control — the CLI mirrors it.** There is no
+guide-authoring screen and no separate versioning: a guide's identity is its
+repo-relative path, and its version is its content.
+
+The chat searches these guides and answers "how do I…" questions from them,
+citing the page — instead of improvising an answer or asking the user something
+your documentation already explains.
+
+- **Synced types:** `.md` `.markdown` `.txt` `.html` `.htm` `.pdf`, plus
+  `.png` `.jpg` `.jpeg` `.gif` `.webp` `.svg` screenshots. Anything else in the
+  folder is ignored. Per-file limit: 10 MB.
+- **Where they land:** the sandbox, like every `confiqure push`.
+  `confiqure push --production` (or `--live`) mirrors the guides corpus to
+  production along with your endpoints.
+- **`--file` pushes skip guides.** A selective push is update-only and must
+  never compute deletions; guides sync is a full sync by definition. Run a plain
+  `confiqure push` to sync them.
+- Set `"guides": []` to turn the sync off.
 
 ## Environment variables
 

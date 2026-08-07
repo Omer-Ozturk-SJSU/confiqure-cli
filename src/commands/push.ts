@@ -9,6 +9,8 @@ import {
   getRegistry,
   postUpload,
   getPushStatus,
+  getGuideRegistry,
+  postGuides,
   promote,
   sandboxWorkspaceKey,
   Manifest,
@@ -16,6 +18,7 @@ import {
   UploadStatusItem,
   ApiError,
 } from "../api.js";
+import { scanGuides, planGuideSync } from "../guides.js";
 import {
   gitDirtyInScanPaths,
   gitHashObject,
@@ -144,6 +147,21 @@ export function registerPush(program: Command): void {
           annotatedPaths: scan.annotated.map((c) => c.filePath),
         })
       );
+
+      // ── 1b. User guides (#316 P2) ────────────────────────────────────────
+      // Runs BEFORE the "nothing to push" return below: guides are an
+      // independent corpus, so an edit that only touches docs/user-guides must
+      // still ship even when no annotated class changed. Skipped under --file,
+      // which is an update-only push that must never compute deletions
+      // (PUSH-008) — and guides sync is a full sync by definition.
+      if (opts.file) {
+        if ((config.guides ?? []).length > 0) {
+          console.log();
+          console.log(chalk.dim("Guides sync skipped: --file is a selective push. Run a full `confiqure push` to sync guides."));
+        }
+      } else {
+        await syncGuides(creds, cwd, config, targetWorkspaceKey);
+      }
 
       if (diff.changes.length === 0) {
         if (opts.file) {
@@ -359,6 +377,90 @@ export function registerPush(program: Command): void {
 }
 
 /**
+ * Sync the folders marked in `guides` (#316 P2): hash what's in the tree, ship
+ * only what changed, and hand the backend the FULL local path list so a page
+ * deleted in git is retired. Git is the version control; this mirrors it.
+ *
+ * Never fails the push. Guides are documentation, not configuration — a docs
+ * folder the dev hasn't created yet, or a backend that doesn't speak /guides
+ * (older engine), must not block shipping their classes.
+ */
+async function syncGuides(
+  creds: Awaited<ReturnType<typeof requireCredentials>>,
+  cwd: string,
+  config: Awaited<ReturnType<typeof loadConfig>>,
+  targetWorkspaceKey: string
+): Promise<void> {
+  const folders = config.guides ?? [];
+  if (folders.length === 0) return;
+
+  let plan;
+  try {
+    const { guides, skipped } = await scanGuides(cwd, config);
+    const registry = await getGuideRegistry(creds, targetWorkspaceKey);
+    plan = planGuideSync(guides, registry, skipped);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) {
+      // The workspace's backend predates the guides endpoint. Say so once and move on.
+      console.log();
+      console.log(chalk.dim("Guides sync unavailable on this backend — skipping."));
+      return;
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    console.log();
+    console.log(chalk.yellow("⚠"), `Guides sync skipped: ${msg}`);
+    return;
+  }
+
+  if (plan.upload.length === 0 && plan.retire.length === 0) {
+    if (plan.unchanged.length > 0) {
+      console.log();
+      console.log(chalk.dim(`Guides: ${plan.unchanged.length} file${plan.unchanged.length === 1 ? "" : "s"} already in sync.`));
+    }
+    for (const s of plan.skipped) {
+      console.log(`  ${chalk.yellow("⚠")} ${s.path} skipped — ${s.reason}`);
+    }
+    return;
+  }
+
+  console.log();
+  console.log(
+    `${chalk.cyan("⏵")} ${chalk.bold("Guides")} (${folders.join(", ")}): ` +
+      `${plan.upload.length} to upload, ${plan.unchanged.length} unchanged, ${plan.retire.length} to retire.`
+  );
+  for (const s of plan.skipped) {
+    console.log(`  ${chalk.yellow("⚠")} ${s.path} skipped — ${s.reason}`);
+  }
+
+  try {
+    const resp = await postGuides(creds, plan.paths, plan.upload, targetWorkspaceKey);
+    console.log(
+      chalk.bold(
+        `  Synced: ${resp.accepted} uploaded, ${resp.unchanged} unchanged, ${resp.retired} retired, ${resp.rejected} rejected.`
+      )
+    );
+    for (const item of resp.items) {
+      if (item.status === "UNCHANGED") continue; // already summarized; keep the list to what moved
+      const icon =
+        item.status === "ACCEPTED"
+          ? chalk.green("✓")
+          : item.status === "RETIRED"
+            ? chalk.gray("−")
+            : chalk.red("✗");
+      const tail = item.error ? chalk.red(` — ${item.error}`) : "";
+      console.log(`  ${icon} ${item.sourcePath}${tail}`);
+    }
+    if (resp.rejected > 0) {
+      // Visible, but not fatal: the class push is the contract, guides are content.
+      console.log(chalk.yellow("  ⚠ Some guides were rejected — see the reasons above."));
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.log(chalk.yellow("  ⚠"), `Guides sync failed: ${msg}`);
+  }
+}
+
+/**
  * Promote-only path: skip the entire diff/upload flow, build the configEnd list
  * from the local scan, confirm with the user, and call the backend's promote
  * endpoint. The CLI does NOT re-push source — promote copies the runbook
@@ -411,6 +513,10 @@ async function runPromote(
     for (const ce of resp.promotedConfigEnds) {
       console.log(`  ${chalk.green("✓")} ${ce}`);
     }
+    // #316 P2: promote also mirrors the workspace's user guides sandbox → prod.
+    // Server-side, alongside the tool registry and the knowledge template —
+    // the CLI doesn't re-ship them, so say so rather than leave it invisible.
+    console.log(chalk.dim("  User guides were mirrored to production with this promote."));
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.log();

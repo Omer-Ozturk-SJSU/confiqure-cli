@@ -10,6 +10,13 @@ export interface LanguageScan {
 export interface ProjectConfig {
   scanPaths: string[];
   ignore: string[];
+  /**
+   * Folders holding the product's own user guides. `confiqure push` hashes every
+   * guide file in them, ships only what changed, and retires what you deleted —
+   * git stays the version control, the CLI just mirrors it. The chat searches
+   * these before asking the user, and answers how-to questions from them.
+   */
+  guides: string[];
   languages: Record<string, LanguageScan>;
 }
 
@@ -21,6 +28,7 @@ export const CONFIG_FILE = "confiqure.config.json";
  */
 export const DEFAULT_CONFIG: ProjectConfig = {
   scanPaths: ["src/**", "lib/**", "app/**"],
+  guides: ["docs/user-guides"],
   ignore: [
     "node_modules",
     ".git",
@@ -56,6 +64,10 @@ export async function loadConfig(cwd: string): Promise<ProjectConfig> {
   const parsed = JSON.parse(raw) as Partial<ProjectConfig>;
   return {
     scanPaths: parsed.scanPaths ?? DEFAULT_CONFIG.scanPaths,
+    // Falls back to the default folder rather than [] so an existing project
+    // picks guides up by simply creating docs/user-guides. A folder that
+    // doesn't exist scans to nothing, so the fallback stays a no-op until then.
+    guides: parsed.guides ?? DEFAULT_CONFIG.guides,
     ignore: parsed.ignore ?? DEFAULT_CONFIG.ignore,
     languages: parsed.languages ?? DEFAULT_CONFIG.languages,
   };
