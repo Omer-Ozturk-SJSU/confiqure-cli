@@ -19,7 +19,7 @@ export function registerTools(program: Command): void {
         console.log(chalk.dim("(no tools registered)"));
         console.log(
           chalk.dim("Add one with: ") +
-            chalk.cyan("confiqure tools set <name> --url <url> --instructions \"...\"")
+            chalk.cyan("confiqure tools set <name> [--url <url>] --instructions \"...\"")
         );
         return;
       }
@@ -34,8 +34,11 @@ export function registerTools(program: Command): void {
 
   tools
     .command("set <name>")
-    .description("Create or update a tool. Provide --url and (optionally) instructions.")
-    .requiredOption("--url <url>", "Tool callback URL the backend will POST to")
+    .description(
+      "Create or update a tool. --url is required when creating a server-side tool; " +
+        "browser tools have none, so omit it and send only instructions."
+    )
+    .option("--url <url>", "Tool callback URL the backend will POST to (server-side tools only)")
     .option(
       "--instructions <text>",
       "Free-text guidance for the AI: what the tool does, when to invoke it"
@@ -47,7 +50,7 @@ export function registerTools(program: Command): void {
     .action(
       async (
         name: string,
-        opts: { url: string; instructions?: string; instructionsFile?: string }
+        opts: { url?: string; instructions?: string; instructionsFile?: string }
       ) => {
         const creds = await requireCredentials();
         let instructions: string | null = opts.instructions ?? null;
@@ -56,7 +59,12 @@ export function registerTools(program: Command): void {
         }
         try {
           const saved = await upsertTool(creds, name, opts.url, instructions);
-          console.log(chalk.green("✓"), `${saved.name} → ${saved.url}`);
+          // A browser tool has no callback URL; printing "undefined" is how a placeholder
+          // ends up being typed in the first place.
+          console.log(
+            chalk.green("✓"),
+            saved.url ? `${saved.name} → ${saved.url}` : `${saved.name} ${chalk.dim("(browser tool)")}`
+          );
           if (saved.instructions) {
             const first = saved.instructions.split(/\r?\n/)[0] ?? "";
             console.log(chalk.dim(`  ${first}`));

@@ -323,7 +323,7 @@ export async function listTools(creds: Credentials): Promise<ToolItem[]> {
 export async function upsertTool(
   creds: Credentials,
   name: string,
-  url: string,
+  url: string | undefined,
   instructions: string | null
 ): Promise<ToolItem> {
   const res = await fetch(
@@ -334,7 +334,9 @@ export async function upsertTool(
         Authorization: `Bearer ${creds.token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ url, instructions: instructions ?? null }),
+      // url is OMITTED when absent (JSON.stringify drops an undefined value) so the backend
+      // leaves an existing tool's url alone — never sent as the string "undefined".
+      body: JSON.stringify({ url: url || undefined, instructions: instructions ?? null }),
     }
   );
   if (!res.ok) {
