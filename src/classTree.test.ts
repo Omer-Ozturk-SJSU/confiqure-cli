@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseJavaFiles, buildClassTrees, collectToolReachableFiles } from "./classTree.js";
+import { lintToolClasses } from "./lint.js";
 
 /**
  * #140/#141 — the reachability closure of a `@Confiqure` endpoint must be the transitive
@@ -153,23 +154,25 @@ describe("buildClassTrees — #140 interface `extends`/`implements`", () => {
   });
 });
 
-describe("collectToolReachableFiles — #140 follow `extends` from tool DTOs", () => {
-  it("walks a tool input DTO's ancestor chain", async () => {
+describe("collectToolReachableFiles — tool-class DTOs ship with their ancestors and generics", () => {
+  it("walks an operation's input DTO ancestor chain and unwraps a generic return type", async () => {
     const files = {
-      "ToolCtl.java": `public class ToolCtl {
-          @ai.confiqure.annotation.Confiqure.Tool
-          public String run(@org.springframework.web.bind.annotation.RequestBody CreateReq req) { return ""; }
+      "ToolCtl.java": `@ai.confiqure.annotation.Confiqure.Tool(name = "ToolCtl")
+        @RequestMapping("/api")
+        public class ToolCtl {
+          @PostMapping("/run")
+          public List<Result> run(@org.springframework.web.bind.annotation.RequestBody CreateReq req) { return null; }
         }`,
       "CreateReq.java": `public class CreateReq extends BaseReq { private String extra; }`,
       "BaseReq.java": `public class BaseReq { private Payload payload; }`,
       "Payload.java": `public class Payload { private String data; }`,
+      "Result.java": `public class Result { private String r; }`,
+      "Unrelated.java": `public class Unrelated { private String u; }`,
     };
     const parsed = await parseJavaFiles(new Map(Object.entries(files)));
-    const tools = parsed.flatMap((p) => p.tools);
-    const reach = collectToolReachableFiles(parsed, tools);
-    expect(reach).toContain("CreateReq.java");
-    expect(reach).toContain("BaseReq.java");
-    expect(reach).toContain("Payload.java");
+    const toolClasses = parsed.flatMap((p) => p.toolClasses);
+    const reach = collectToolReachableFiles(parsed, toolClasses);
+    expect([...reach].sort()).toEqual(["BaseReq.java", "CreateReq.java", "Payload.java", "Result.java"]);
   });
 });
 
@@ -193,5 +196,77 @@ describe("buildClassTrees — 3.0 object roots", () => {
     expect(decls.get("F")!.objectKind).toBe("FACTS");
     expect(decls.get("Part")!.objectKind).toBeNull();
     expect(decls.get("Old")!.objectKind).toBeNull();
+  });
+});
+
+async function parseOne(filePath: string, src: string) {
+  const [pf] = await parseJavaFiles(new Map([[filePath, src]]));
+  return pf;
+}
+
+describe("tool classes (3.0)", () => {
+  it("parses a tool class with Spring mappings, @Browser and @Async", async () => {
+    const src = `
+    /** FLOW: find, then change. */
+    @Confiqure.Tool(name = "ListingsTool")
+    @RestController
+    @RequestMapping("/api/confiqure/listings")
+    public class ListingsTool {
+      @PostMapping("/by-title") public List<Listing> byTitle(@RequestBody TitleQuery q) { return null; }
+      @Confiqure.Browser public Ack openProduct360(@RequestBody SkuRef ref) { return null; }
+      @Confiqure.Async @PostMapping("/analyze") public ResponseEntity<Void> analyze(@RequestBody SkuRef ref) { return null; }
+      private String helper() { return ""; }
+    }`;
+    const pf = await parseOne("a/ListingsTool.java", src);
+    expect(pf.toolClasses).toHaveLength(1);
+    const tc = pf.toolClasses[0];
+    expect(tc.name).toBe("ListingsTool");
+    expect(tc.className).toBe("ListingsTool");
+    expect(tc.classUniqueId).toBe("a/ListingsTool.java");
+    expect(tc.doc).toContain("FLOW: find, then change.");
+    expect(tc.operations.map((o) => o.name)).toEqual(["byTitle", "openProduct360", "analyze"]);
+    expect(tc.operations[0]).toMatchObject({ httpMethod: "POST", path: "/api/confiqure/listings/by-title", inputType: "TitleQuery", returnType: "List<Listing>", browser: false, async: false });
+    expect(tc.operations[1]).toMatchObject({ browser: true, httpMethod: null, path: null, inputType: "SkuRef", returnType: "Ack" });
+    expect(tc.operations[2]).toMatchObject({ async: true, httpMethod: "POST", path: "/api/confiqure/listings/analyze" });
+  });
+
+  it("reads every Spring mapping form: Get/Put/Delete, value=/path=, RequestMapping(method), no class base", async () => {
+    const src = `
+    @Confiqure.Tool
+    public class Misc {
+      /** Reads one. */
+      @GetMapping(value = "/one") public Item one(@RequestParam String id) { return null; }
+      @PutMapping(path = "items/") public Ack put(@RequestBody Item i) { return null; }
+      @DeleteMapping({"/items/del"}) public Ack del(@RequestBody Ref r) { return null; }
+      @RequestMapping(value = "/rm", method = RequestMethod.GET) public Ack rm() { return null; }
+      @RequestMapping("/rm-default") public Ack rmDefault(@RequestBody Ref r) { return null; }
+    }`;
+    const tc = (await parseOne("b/Misc.java", src)).toolClasses[0];
+    expect(tc.name).toBe("Misc");
+    expect(tc.doc).toBeNull();
+    const byName = new Map(tc.operations.map((o) => [o.name, o]));
+    expect(byName.get("one")).toMatchObject({ httpMethod: "GET", path: "/one", inputType: "String", doc: "/** Reads one. */" });
+    expect(byName.get("put")).toMatchObject({ httpMethod: "PUT", path: "/items" });
+    expect(byName.get("del")).toMatchObject({ httpMethod: "DELETE", path: "/items/del" });
+    expect(byName.get("rm")).toMatchObject({ httpMethod: "GET", path: "/rm", inputType: null });
+    expect(byName.get("rmDefault")).toMatchObject({ httpMethod: "POST", path: "/rm-default" });
+  });
+
+  it("a bare @Async is Spring's unless the file imports Confiqure's", async () => {
+    const spring = await parseOne("c/S.java", `@Confiqure.Tool public class S { @Async @PostMapping("/x") public Ack x(@RequestBody Q q) { return null; } }`);
+    expect(spring.toolClasses[0].operations[0].async).toBe(false);
+    const ours = await parseOne("c/O.java", `import ai.confiqure.annotation.Confiqure.Async;\n@Confiqure.Tool public class O { @Async @PostMapping("/x") public Ack x(@RequestBody Q q) { return null; } }`);
+    expect(ours.toolClasses[0].operations[0].async).toBe(true);
+  });
+
+  it("a class without @Confiqure.Tool is not a tool class", async () => {
+    const pf = await parseOne("d/C.java", `@RestController public class C { @PostMapping("/x") public Ack x() { return null; } }`);
+    expect(pf.toolClasses).toEqual([]);
+  });
+
+  it("lint: a public operation with neither a mapping nor @Browser is an error", () => {
+    const errors = lintToolClasses([{ name: "T", className: "T", classUniqueId: "a/T.java", doc: "x", sourceFile: "a/T.java",
+      operations: [{ name: "orphan", httpMethod: null, path: null, browser: false, async: false, inputType: "Q", returnType: "R", doc: null }] }]);
+    expect(errors).toEqual(["a/T.java: operation `orphan` has no Spring mapping (@PostMapping/@GetMapping/…) and is not @Confiqure.Browser — confiqure cannot call it."]);
   });
 });

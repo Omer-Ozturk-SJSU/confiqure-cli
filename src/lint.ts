@@ -1,4 +1,17 @@
-import type { EnumDecl, ParsedFile } from "./classTree.js";
+import type { EnumDecl, ParsedFile, ParsedToolClass } from "./classTree.js";
+
+/** A public operation confiqure can't reach — no Spring mapping and not a browser operation — is an error. */
+export function lintToolClasses(classes: ParsedToolClass[]): string[] {
+  const out: string[] = [];
+  for (const tc of classes) {
+    for (const op of tc.operations) {
+      if (!op.browser && !op.path) {
+        out.push(`${tc.sourceFile}: operation \`${op.name}\` has no Spring mapping (@PostMapping/@GetMapping/…) and is not @Confiqure.Browser — confiqure cannot call it.`);
+      }
+    }
+  }
+  return out;
+}
 
 /**
  * Annotation 3.0 gate: the pre-3.0 forms are ERRORS, not warnings — `push` prints them and stops

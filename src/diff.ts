@@ -1,4 +1,4 @@
-import { DiscoveredClass } from "./scan.js";
+import { DiscoveredClass, ObjectKind } from "./scan.js";
 import { RegistryItem } from "./api.js";
 
 export type ChangeOp = "ADDED" | "CHANGED" | "RENAMED" | "DELETED";
@@ -12,6 +12,12 @@ export interface ChangeEntry {
   previousFilePath?: string;
   previousClassUniqueId?: string;
   gitSha: string;
+  /** The 3.0 object kind, or TOOL_CLASS for a `@Confiqure.Tool` class. Absent on DELETED entries. */
+  objectKind?: ObjectKind | "TOOL_CLASS";
+  /** The `@Confiqure.Identity` field of a List object, else null. */
+  identityField?: string | null;
+  /** The `callback` of a `@Confiqure.Facts` class, else null. */
+  callback?: string | null;
   /**
    * This endpoint's transitive reachable files (root + field-type + ancestor closure), so the
    * backend can store a PER-ENDPOINT nested map instead of one shared batch-wide kitchen-sink
@@ -61,6 +67,9 @@ export function diffAgainstRegistry(
         configEnd: cls.configEnd,
         filePath: cls.filePath,
         gitSha: cls.gitSha,
+        objectKind: cls.objectKind,
+        identityField: cls.identityField,
+        callback: cls.callback,
         relatedFiles: cls.relatedFiles,
       });
     } else if (existing.gitVersion !== cls.gitSha) {
@@ -71,6 +80,9 @@ export function diffAgainstRegistry(
         configEnd: cls.configEnd,
         filePath: cls.filePath,
         gitSha: cls.gitSha,
+        objectKind: cls.objectKind,
+        identityField: cls.identityField,
+        callback: cls.callback,
         relatedFiles: cls.relatedFiles,
       });
     } else {

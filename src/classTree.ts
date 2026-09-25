@@ -103,21 +103,36 @@ export interface EnumDecl {
   enclosingTypes: string[];
 }
 
-/** A `@Confiqure.Tool`-annotated method discovered during the scan. */
-export interface ParsedTool {
-  /** Tool name (from `name=` arg, else the method name). */
+/** One public method of a tool class — one typed operation the chat can call (annotation 3.0). */
+export interface ParsedOperation {
+  /** Method name. */
   name: string;
-  /** From the `serverSide` arg; defaults to true. */
-  serverSide: boolean;
-  /** From the `async` arg; defaults to false. Server-side only → SERVER_ASYNC dispatch. */
+  /** From the Spring mapping; null for a `@Confiqure.Browser` operation without one. */
+  httpMethod: "POST" | "GET" | "PUT" | "DELETE" | null;
+  /** Class `@RequestMapping` path + method mapping path, joined; null without a mapping. */
+  path: string | null;
+  /** `@Confiqure.Browser` — runs in the page. */
+  browser: boolean;
+  /** `@Confiqure.Async` — the result is delivered later. */
   async: boolean;
-  /** The `@RequestBody` param type (or first param type) — the input DTO. */
+  /** The `@RequestBody` param type, else the first param type. */
   inputType: string | null;
-  /** Method return type. */
+  /** Method return type as written (generics kept). */
   returnType: string | null;
   /** Preceding Javadoc/comment, if any. */
   doc: string | null;
-  /** File the tool was declared in. */
+}
+
+/** A class annotated `@Confiqure.Tool` — its Javadoc is the business FLOW, its public methods the operations. */
+export interface ParsedToolClass {
+  /** `@Confiqure.Tool(name)`, else the class name. */
+  name: string;
+  className: string;
+  /** File path — the same identity rule as objects. */
+  classUniqueId: string;
+  /** The class Javadoc = the FLOW the chat follows. */
+  doc: string | null;
+  operations: ParsedOperation[];
   sourceFile: string;
 }
 
@@ -125,7 +140,7 @@ export interface ParsedFile {
   filePath: string;
   packageName: string | null;
   declarations: ParsedDecl[];
-  tools: ParsedTool[];
+  toolClasses: ParsedToolClass[];
   /** Every enum in the file, including nested ones, with their enclosing-type chain (lint input). */
   enums: EnumDecl[];
 }
@@ -181,17 +196,27 @@ export async function parseJavaFile(filePath: string): Promise<ParsedFile | null
 function extractFile(filePath: string, root: SyntaxNode): ParsedFile {
   let packageName: string | null = null;
   const declarations: ParsedDecl[] = [];
-  const tools: ParsedTool[] = [];
+  const toolClasses: ParsedToolClass[] = [];
+  const imports = root.namedChildren
+    .filter((c): c is SyntaxNode => !!c && c.type === "import_declaration")
+    .map((c) => c.text.replace(/^import\s+(static\s+)?|\s*;$/g, "").replace(/\s+/g, ""));
 
+  let pendingDoc: string | null = null;
   for (const child of root.namedChildren) {
     if (!child) continue;
+    if (child.type === "block_comment" || child.type === "line_comment") {
+      pendingDoc = pendingDoc ? `${pendingDoc}\n${child.text}` : child.text;
+      continue;
+    }
     if (child.type === "package_declaration") {
       packageName = extractPackageName(child);
     } else if (isTypeDeclaration(child.type)) {
       const decl = extractDeclaration(child);
       if (decl) declarations.push(decl);
-      tools.push(...extractToolMethods(child, filePath));
+      const tc = extractToolClass(child, pendingDoc, filePath, imports);
+      if (tc) toolClasses.push(tc);
     }
+    pendingDoc = null;
   }
 
   // Separate pass for the full enum graph (nested enums too) — purely additive, does not touch
@@ -199,7 +224,7 @@ function extractFile(filePath: string, root: SyntaxNode): ParsedFile {
   const enums: EnumDecl[] = [];
   collectEnums(root, [], enums);
 
-  return { filePath, packageName, declarations, tools, enums };
+  return { filePath, packageName, declarations, toolClasses, enums };
 }
 
 /**
@@ -246,59 +271,113 @@ function extractEnumConstants(body: SyntaxNode | null): string[] {
   return constants;
 }
 
-/** Scan a type declaration's body for `@Confiqure.Tool`-annotated methods. */
-function extractToolMethods(typeNode: SyntaxNode, filePath: string): ParsedTool[] {
+/**
+ * A `@Confiqure.Tool` class → its operations. Every public method is one operation; its URL comes
+ * from Spring (`@RequestMapping` on the class + `@Post/Get/Put/Delete/RequestMapping` on the method).
+ * A public method with neither a mapping nor `@Confiqure.Browser` is kept (lintToolClasses reports it).
+ */
+function extractToolClass(typeNode: SyntaxNode, doc: string | null, filePath: string, imports: string[]): ParsedToolClass | null {
+  if (typeNode.type !== "class_declaration") return null;
+  const ann = findConfiqureAnnotation(typeNode, "Tool", imports);
+  if (!ann) return null;
+  const className = typeNode.childForFieldName("name")?.text ?? "";
+  const name = annotationStringArg(ann, "name") ?? singleStringArg(ann) ?? className;
+  const basePath = mappingPath(findAnnotation(typeNode, "RequestMapping")) ?? "";
+
+  const operations: ParsedOperation[] = [];
   const body = typeNode.childForFieldName("body");
-  if (!body) return [];
-  const out: ParsedTool[] = [];
   let pendingDoc: string | null = null;
-  for (const child of body.namedChildren) {
-    if (!child) continue;
-    if (child.type === "block_comment" || child.type === "line_comment") {
-      pendingDoc = pendingDoc ? `${pendingDoc}\n${child.text}` : child.text;
+  for (const m of body?.namedChildren ?? []) {
+    if (!m) continue;
+    if (m.type === "block_comment" || m.type === "line_comment") {
+      pendingDoc = pendingDoc ? `${pendingDoc}\n${m.text}` : m.text;
       continue;
     }
-    if (child.type === "method_declaration") {
-      const tool = extractToolFromMethod(child, pendingDoc, filePath);
-      if (tool) out.push(tool);
+    if (m.type === "method_declaration" && isPublic(m)) {
+      const mapping = (["PostMapping", "GetMapping", "PutMapping", "DeleteMapping", "RequestMapping"] as const)
+        .map((n) => ({ n, a: findAnnotation(m, n) }))
+        .find((x) => x.a !== null);
+      let httpMethod: ParsedOperation["httpMethod"] = null;
+      let path: string | null = null;
+      if (mapping) {
+        httpMethod =
+          mapping.n === "RequestMapping"
+            ? requestMethodOf(mapping.a!)
+            : (mapping.n.replace("Mapping", "").toUpperCase() as ParsedOperation["httpMethod"]);
+        path = joinPath(basePath, mappingPath(mapping.a) ?? "");
+      }
+      operations.push({
+        name: m.childForFieldName("name")?.text ?? "",
+        httpMethod,
+        path,
+        browser: findConfiqureAnnotation(m, "Browser", imports) !== null,
+        async: findConfiqureAnnotation(m, "Async", imports) !== null,
+        inputType: extractInputType(m),
+        returnType: m.childForFieldName("type")?.text ?? null,
+        doc: pendingDoc,
+      });
     }
     pendingDoc = null;
   }
-  return out;
+  return { name, className, classUniqueId: filePath, doc, operations, sourceFile: filePath };
 }
 
-function extractToolFromMethod(method: SyntaxNode, doc: string | null, filePath: string): ParsedTool | null {
-  const ann = findToolAnnotation(method);
-  if (!ann) return null;
-
-  const methodName = method.childForFieldName("name")?.text ?? "";
-  const nameArg = annotationStringArg(ann, "name");
-  const name = nameArg && nameArg.length > 0 ? nameArg : methodName;
-
-  const serverSideRaw = annotationRawArg(ann, "serverSide");
-  const serverSide = serverSideRaw == null ? true : serverSideRaw.trim() === "true";
-
-  const asyncRaw = annotationRawArg(ann, "async");
-  const isAsync = asyncRaw == null ? false : asyncRaw.trim() === "true";
-
-  const returnType = method.childForFieldName("type")?.text ?? null;
-  const inputType = extractInputType(method);
-
-  return { name, serverSide, async: isAsync, inputType, returnType, doc, sourceFile: filePath };
+function isPublic(method: SyntaxNode): boolean {
+  return method.children.some((c) => c?.type === "modifiers" && /(^|\s)public(\s|$)/.test(c.text));
 }
 
-/** Find an `@Confiqure.Tool` / `@Tool` annotation on a method's modifiers. */
-function findToolAnnotation(method: SyntaxNode): SyntaxNode | null {
-  for (const child of method.children) {
-    if (!child || child.type !== "modifiers") continue;
-    for (const mod of child.namedChildren) {
-      if (!mod) continue;
-      if (mod.type !== "annotation" && mod.type !== "marker_annotation") continue;
-      const annName = mod.childForFieldName("name");
-      if (annName && lastSegment(annName.text) === "Tool") return mod;
-    }
+/**
+ * `@Confiqure.<simple>` on a node — qualified (`Confiqure.Async`, `ai.confiqure….Confiqure.Async`),
+ * or bare (`@Async`) only when the file imports Confiqure's (`…Confiqure.Async` / `…Confiqure.*`):
+ * a bare `@Async` is otherwise Spring's.
+ */
+function findConfiqureAnnotation(node: SyntaxNode, simple: string, imports: string[]): SyntaxNode | null {
+  const bareOk = imports.some((i) => i.endsWith(`Confiqure.${simple}`) || i.endsWith("Confiqure.*"));
+  for (const ann of annotationsOf(node)) {
+    const n = ann.childForFieldName("name")?.text ?? "";
+    if (new RegExp(`(?:^|\\.)Confiqure\\.${simple}$`).test(n) || (bareOk && n === simple)) return ann;
   }
   return null;
+}
+
+/** An annotation whose simple name is `simple` (e.g. Spring's `PostMapping`, qualified or not). */
+function findAnnotation(node: SyntaxNode, simple: string): SyntaxNode | null {
+  for (const ann of annotationsOf(node)) {
+    if (lastSegment(ann.childForFieldName("name")?.text ?? "") === simple) return ann;
+  }
+  return null;
+}
+
+/** A mapping's path: `value=` / `path=` / the single positional value (first string of an array). */
+function mappingPath(ann: SyntaxNode | null): string | null {
+  if (!ann) return null;
+  const raw = annotationRawArg(ann, "value") ?? annotationRawArg(ann, "path") ?? positionalArg(ann);
+  return raw ? (raw.match(/"([^"]*)"/)?.[1] ?? null) : null;
+}
+
+/** `@RequestMapping(method = RequestMethod.GET)` → GET; no `method` → POST. */
+function requestMethodOf(ann: SyntaxNode): ParsedOperation["httpMethod"] {
+  const raw = annotationRawArg(ann, "method");
+  const m = raw?.match(/\b(POST|GET|PUT|DELETE)\b/);
+  return m ? (m[1] as ParsedOperation["httpMethod"]) : "POST";
+}
+
+function joinPath(a: string, b: string): string {
+  return (a.replace(/\/+$/, "") + "/" + b.replace(/^\/+/, "")).replace(/\/+$/, "") || "/";
+}
+
+/** The single positional (key-less) argument's raw text, e.g. `"/x"` in `@PostMapping("/x")`. */
+function positionalArg(ann: SyntaxNode): string | null {
+  const args = ann.childForFieldName("arguments");
+  if (!args) return null;
+  const first = args.namedChildren.find((c) => c && c.type !== "element_value_pair" && !c.type.endsWith("comment"));
+  return first?.text ?? null;
+}
+
+/** A positional string argument, quotes stripped (`@Confiqure.Tool("X")`). */
+function singleStringArg(ann: SyntaxNode): string | null {
+  const raw = positionalArg(ann);
+  return raw ? (raw.match(/^"([^"]*)"$/)?.[1] ?? null) : null;
 }
 
 /** Value of a string-literal annotation arg, quotes stripped; null if absent. */
@@ -598,15 +677,15 @@ export function buildClassTrees(parsed: ParsedFile[]): BuildClassTreesResult {
 }
 
 /**
- * Files reachable from TOOL signatures: each `@Confiqure.Tool` method's input
- * DTO + return type, walked through the same field-type graph as endpoint
+ * Files reachable from TOOL signatures: each tool-class operation's input
+ * DTO + return type, walked through the same field-type graph as object
  * roots. Without this, a tool input DTO living in its own file ships ONLY if
  * some `@Confiqure` endpoint happens to reference it — and the Composer can't
  * derive the tool's input schema from source it never received.
  */
 export function collectToolReachableFiles(
   parsed: ParsedFile[],
-  tools: ParsedTool[],
+  toolClasses: ParsedToolClass[],
 ): Set<string> {
   const classNameToDecl = new Map<string, { file: string; decl: ParsedDecl }>();
   for (const pf of parsed) {
@@ -619,9 +698,11 @@ export function collectToolReachableFiles(
 
   const reachable = new Set<string>();
   const stack: string[] = [];
-  for (const t of tools) {
-    if (t.inputType) stack.push(t.inputType);
-    if (t.returnType) stack.push(t.returnType);
+  // Every identifier in a signature type — `List<Listing>` → List, Listing; non-project ones fall away.
+  for (const tc of toolClasses) {
+    for (const op of tc.operations) {
+      for (const t of [op.inputType, op.returnType]) stack.push(...(t?.match(/[A-Za-z_$][\w$]*/g) ?? []));
+    }
   }
   const visited = new Set<string>();
   while (stack.length > 0) {

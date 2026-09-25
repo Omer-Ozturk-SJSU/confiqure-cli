@@ -12,9 +12,9 @@ import {
   ClassTree,
   ObjectKind,
   ParsedDecl,
-  ParsedTool,
+  ParsedToolClass,
 } from "./classTree.js";
-import { lintBundle, lintSources } from "./lint.js";
+import { lintBundle, lintSources, lintToolClasses } from "./lint.js";
 
 export type { ObjectKind } from "./classTree.js";
 
@@ -51,16 +51,16 @@ export interface DiscoveredClass {
   visitedClasses: string[];
 }
 
-/** A controller file containing @Confiqure.Tool methods. */
+/** The source file of a `@Confiqure.Tool` class. */
 export interface ToolFile {
   filePath: string;
   gitSha: string;
 }
 
 export interface ScanResult {
-  /** Annotated root classes (one per `@Confiqure` endpoint). */
+  /** Object roots (one per 3.0 object annotation). */
   annotated: DiscoveredClass[];
-  /** Controller files with @Confiqure.Tool methods. */
+  /** Source files of the `@Confiqure.Tool` classes. */
   toolFiles: ToolFile[];
   /**
    * Files containing a `@Confiqure.DefaultCallbackHook` method. Shipped in the
@@ -70,8 +70,8 @@ export interface ScanResult {
    * otherwise never upload).
    */
   hookFiles: ToolFile[];
-  /** Every @Confiqure.Tool method discovered (server-side + frontend). */
-  tools: ParsedTool[];
+  /** Every `@Confiqure.Tool` class with its operations. */
+  toolClasses: ParsedToolClass[];
   /** All scanned files keyed by relative path → content. */
   allFiles: Map<string, string>;
   /** Language with the most annotated roots. */
@@ -161,7 +161,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
   const annotated: DiscoveredClass[] = [];
   const toolFiles: ToolFile[] = [];
   const hookFiles: ToolFile[] = [];
-  const tools: ParsedTool[] = [];
+  const toolClasses: ParsedToolClass[] = [];
   const reachableFiles = new Set<string>();
   const toolReachableFiles = new Set<string>();
   const declByName = new Map<string, ParsedDecl>();
@@ -179,9 +179,9 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
     javaTrees.push(...trees);
     for (const pf of parsed) {
       for (const d of pf.declarations) if (!declByName.has(d.name)) declByName.set(d.name, d);
-      tools.push(...pf.tools);
+      toolClasses.push(...pf.toolClasses);
       const src = allFiles.get(pf.filePath) ?? "";
-      if (fileHasConfiqureTool(pf.declarations, src)) {
+      if (pf.toolClasses.length > 0) {
         const gitSha = await gitHashObject(pf.filePath, cwd).catch(() => "");
         toolFiles.push({ filePath: pf.filePath, gitSha });
         reachableFiles.add(pf.filePath);
@@ -193,9 +193,10 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
         hookFiles.push({ filePath: pf.filePath, gitSha });
       }
     }
-    for (const f of collectToolReachableFiles(parsed, tools)) {
+    for (const f of collectToolReachableFiles(parsed, toolClasses)) {
       toolReachableFiles.add(f);
     }
+    errors.push(...lintToolClasses(toolClasses));
 
     // Push-time lint (#83): warn on simple-name enum collisions / bad enum defaults the host can't
     // see but a name-based resolver trips over. Advisory only — never blocks the push.
@@ -306,7 +307,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
     }
   }
 
-  return { annotated, toolFiles, hookFiles, tools, allFiles, primaryLanguage, reachableFiles, toolReachableFiles, errors };
+  return { annotated, toolFiles, hookFiles, toolClasses, allFiles, primaryLanguage, reachableFiles, toolReachableFiles, errors };
 }
 
 /**
@@ -317,10 +318,6 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
 export function isTestPath(filePath: string): boolean {
   const norm = filePath.replace(/\\/g, "/");
   return norm.includes("/src/test/") || norm.startsWith("src/test/");
-}
-
-function fileHasConfiqureTool(declarations: import("./classTree.js").ParsedDecl[], source: string): boolean {
-  return source.includes("@Confiqure.Tool") || source.includes("@Tool");
 }
 
 function fileHasCallbackHook(source: string): boolean {

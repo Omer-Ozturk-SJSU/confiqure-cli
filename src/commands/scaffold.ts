@@ -4,7 +4,15 @@ import { writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadConfig } from "../config.js";
 import { scanProject } from "../scan.js";
-import { parseJavaFiles, ParsedDecl, ParsedField, ParsedTool } from "../classTree.js";
+import { parseJavaFiles, ParsedDecl, ParsedField } from "../classTree.js";
+
+/** One browser operation to stub, keyed `<ToolClass>.<operation>` — the name confiqure registers it under. */
+interface ParsedTool {
+  name: string;
+  inputType: string | null;
+  returnType: string | null;
+  doc: string | null;
+}
 
 interface ScaffoldOpts {
   output?: string;
@@ -15,16 +23,20 @@ const DEFAULT_OUTPUT = "confiqure.tools.ts";
 export function registerScaffold(program: Command): void {
   program
     .command("scaffold")
-    .description("Generate frontend-tool handler stubs (confiqure.tools.ts) from @Confiqure.Tool(serverSide=false) methods")
+    .description("Generate browser-operation handler stubs (confiqure.tools.ts) from @Confiqure.Browser methods of @Confiqure.Tool classes")
     .option("-o, --output <file>", "output file path", DEFAULT_OUTPUT)
     .action(async (opts: ScaffoldOpts) => {
       const cwd = process.cwd();
       const config = await loadConfig(cwd);
       const scan = await scanProject(cwd, config);
 
-      const frontendTools = scan.tools.filter((t) => !t.serverSide);
+      const frontendTools: ParsedTool[] = scan.toolClasses.flatMap((tc) =>
+        tc.operations
+          .filter((op) => op.browser)
+          .map((op) => ({ name: `${tc.name}.${op.name}`, inputType: op.inputType, returnType: op.returnType, doc: op.doc }))
+      );
       if (frontendTools.length === 0) {
-        console.log(chalk.dim("No frontend tools (@Confiqure.Tool serverSide=false) found — nothing to scaffold."));
+        console.log(chalk.dim("No browser operations (@Confiqure.Browser in a @Confiqure.Tool class) found — nothing to scaffold."));
         return;
       }
 
@@ -54,7 +66,7 @@ export function registerScaffold(program: Command): void {
       }
 
       // Merge-safe: never clobber an existing file. Report only the missing stubs.
-      const missing = frontendTools.filter((t) => !existing.includes(`${t.name}:`));
+      const missing = frontendTools.filter((t) => !existing.includes(`"${t.name}":`));
       if (missing.length === 0) {
         console.log(chalk.green("✓"), `${opts.output ?? DEFAULT_OUTPUT} already has handlers for all ${frontendTools.length} frontend tool${frontendTools.length === 1 ? "" : "s"}.`);
         return;
@@ -110,7 +122,7 @@ function generateStubs(tools: ParsedTool[]): string {
     const ret = t.returnType && t.returnType !== "void" ? javaTypeToTs(t.returnType) : "void";
     const docLines = docComment(t, inputTs, ret);
     lines.push(...docLines.map((l) => "  " + l));
-    lines.push(`  ${t.name}: async (input: ${inputTs}, ctx: ConfiqureToolContext): Promise<${ret === "void" ? "void" : ret}> => {`);
+    lines.push(`  "${t.name}": async (input: ${inputTs}, ctx: ConfiqureToolContext): Promise<${ret === "void" ? "void" : ret}> => {`);
     lines.push(`    // TODO: implement ${t.name}`);
     lines.push(`    throw new Error("${t.name} not implemented");`);
     lines.push(`  }${i === tools.length - 1 ? "" : ","}`);

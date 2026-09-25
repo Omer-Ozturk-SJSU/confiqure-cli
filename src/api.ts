@@ -167,18 +167,25 @@ export async function postGuides(
   return (await res.json()) as GuideSyncResponse;
 }
 
-/**
- * Deterministic per-tool metadata from the tree-sitter scan. The backend treats
- * `serverSide` here as AUTHORITATIVE over the Composer's model-extracted flag
- * (a hallucinated flip would re-route a tool between HTTP and browser dispatch).
- */
-export interface ManifestToolEntry {
+/** One operation of a tool class, from the tree-sitter scan (Spring mapping + `@Confiqure.Browser/Async`). */
+export interface ManifestOperation {
   name: string;
-  serverSide: boolean;
+  httpMethod: string | null;
+  path: string | null;
+  browser: boolean;
   async: boolean;
   inputType: string | null;
   returnType: string | null;
   doc: string | null;
+}
+
+/** A `@Confiqure.Tool` class: its Javadoc (the FLOW) and its operations. */
+export interface ManifestToolClass {
+  name: string;
+  className: string;
+  classUniqueId: string;
+  doc: string | null;
+  operations: ManifestOperation[];
 }
 
 export interface Manifest {
@@ -189,8 +196,8 @@ export interface Manifest {
   changes: ChangeEntry[];
   files: ManifestFileEntry[];
   toolFiles?: ManifestFileEntry[];
-  /** Structured tool declarations (backward-compatible: absent on older CLIs). */
-  tools?: ManifestToolEntry[];
+  /** The tool classes this push ships (annotation 3.0; replaces the per-method `tools`). */
+  toolClasses?: ManifestToolClass[];
 }
 
 export class ApiError extends Error {

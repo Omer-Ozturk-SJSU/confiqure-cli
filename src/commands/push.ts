@@ -109,12 +109,14 @@ export function registerPush(program: Command): void {
       console.log();
       console.log(renderTrees(scan));
 
-      const frontendTools = scan.tools.filter((t) => !t.serverSide);
+      const frontendTools = scan.toolClasses.flatMap((tc) =>
+        tc.operations.filter((op) => op.browser).map((op) => `${tc.name}.${op.name}`)
+      );
       if (frontendTools.length > 0) {
         console.log();
         console.log(
           chalk.yellow("⚠"),
-          chalk.bold(`${frontendTools.length} frontend tool${frontendTools.length === 1 ? "" : "s"} declared (${frontendTools.map((t) => t.name).join(", ")}).`)
+          chalk.bold(`${frontendTools.length} browser operation${frontendTools.length === 1 ? "" : "s"} declared (${frontendTools.join(", ")}).`)
         );
         console.log(chalk.dim("  These need browser handlers: register via confiqure.init({ tools }) or run `confiqure scaffold`."));
       }
@@ -263,14 +265,13 @@ export function registerPush(program: Command): void {
         changes: diff.changes,
         files,
         toolFiles: toolFileEntries.length > 0 ? toolFileEntries : undefined,
-        tools: scan.tools.length > 0
-          ? scan.tools.map((t) => ({
-              name: t.name,
-              serverSide: t.serverSide,
-              async: t.async,
-              inputType: t.inputType,
-              returnType: t.returnType,
-              doc: t.doc,
+        toolClasses: scan.toolClasses.length > 0
+          ? scan.toolClasses.map((tc) => ({
+              name: tc.name,
+              className: tc.className,
+              classUniqueId: tc.classUniqueId,
+              doc: tc.doc,
+              operations: tc.operations.map((op) => ({ ...op })),
             }))
           : undefined,
       };
@@ -602,6 +603,9 @@ function forceAllChanged(annotated: DiscoveredClass[]): DiffResult {
     configEnd: c.configEnd,
     filePath: c.filePath,
     gitSha: c.gitSha,
+    objectKind: c.objectKind,
+    identityField: c.identityField,
+    callback: c.callback,
     relatedFiles: c.relatedFiles,
   }));
   return { changes, unchanged: 0 };

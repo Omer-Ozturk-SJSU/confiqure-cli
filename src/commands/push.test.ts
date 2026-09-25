@@ -28,15 +28,16 @@ function fixtureScan(): ScanResult {
     annotated: [root("Supplier", "src/dto/Supplier.java"), root("Other", "src/dto/Other.java")],
     toolFiles: [{ filePath: "src/controller/SupplierController.java", gitSha: "sha-controller" }],
     hookFiles: [{ filePath: "src/hooks/CallbackHook.java", gitSha: "sha-hook" }],
-    tools: [
+    toolClasses: [
       {
-        name: "lookupPrice",
-        serverSide: true,
-        async: false,
-        inputType: "ToolInput",
-        returnType: "ToolOutput",
+        name: "SupplierTool",
+        className: "SupplierTool",
+        classUniqueId: "src/controller/SupplierController.java",
         doc: null,
         sourceFile: "src/controller/SupplierController.java",
+        operations: [
+          { name: "lookupPrice", httpMethod: "POST", path: "/api/price", browser: false, async: false, inputType: "ToolInput", returnType: "ToolOutput", doc: null },
+        ],
       },
     ],
     allFiles: new Map(),
@@ -48,14 +49,14 @@ function fixtureScan(): ScanResult {
 }
 
 describe("scopeToFile (#120 — --file must not drop the workspace-level tool sweep)", () => {
-  it("keeps toolFiles/tools/toolReachableFiles/hookFiles from the full-tree scan", () => {
+  it("keeps toolFiles/toolClasses/toolReachableFiles/hookFiles from the full-tree scan", () => {
     const scan = fixtureScan();
     scopeToFile(scan, "Supplier.java");
 
     expect(scan.toolFiles).toEqual([
       { filePath: "src/controller/SupplierController.java", gitSha: "sha-controller" },
     ]);
-    expect(scan.tools.map((t) => t.name)).toEqual(["lookupPrice"]);
+    expect(scan.toolClasses.map((t) => t.name)).toEqual(["SupplierTool"]);
     expect(scan.toolReachableFiles).toEqual(new Set(["src/dto/ToolInput.java"]));
     expect(scan.hookFiles).toEqual([{ filePath: "src/hooks/CallbackHook.java", gitSha: "sha-hook" }]);
   });
