@@ -73,6 +73,13 @@ export function registerPush(program: Command): void {
 
       // ── 1. Scan + diff ───────────────────────────────────────────────────
       const scan = await scanProject(cwd, config);
+      if (scan.errors.length > 0) {
+        console.log();
+        console.log(chalk.red("✗"), chalk.bold(`Push blocked — ${scan.errors.length} annotation 3.0 error${scan.errors.length === 1 ? "" : "s"}:`));
+        for (const e of scan.errors) console.log(`    ${e}`);
+        process.exitCode = 1;
+        return;
+      }
 
       // ── Promote-only path (--production): skip the upload flow entirely and
       // copy the *tested* sandbox runbook to prod verbatim. --live ALSO ends in

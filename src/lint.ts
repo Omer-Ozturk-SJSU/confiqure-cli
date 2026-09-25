@@ -1,6 +1,60 @@
 import type { EnumDecl, ParsedFile } from "./classTree.js";
 
 /**
+ * Annotation 3.0 gate: the pre-3.0 forms are ERRORS, not warnings — `push` prints them and stops
+ * before uploading. The class-level `@Confiqure(...)` / bare `@Confiqure` marker and a method-level
+ * `@Confiqure.Tool` no longer compile against annotation 3.0.0, and the backend refuses an object
+ * without a 3.0 kind; saying so here names the file and the replacement. Comments are stripped
+ * first so a Javadoc that mentions the old form is not an error.
+ */
+export function lintSources(files: { filePath: string; source: string }[]): string[] {
+  const out: string[] = [];
+  for (const f of files) {
+    const src = stripComments(f.source);
+    if (/@Confiqure\b(?!\s*\.)/.test(src)) {
+      out.push(`${f.filePath}: \`@Confiqure(...)\` on a class is not supported since annotation 3.0 — use @Confiqure.Setting / @Confiqure.List / @Confiqure.User.Setting / @Confiqure.User.List (or @Confiqure.Facts).`);
+    }
+    if (hasMethodLevelTool(src)) {
+      out.push(`${f.filePath}: \`@Confiqure.Tool\` on a method is not supported since annotation 3.0 — declare a tool CLASS (annotate the class) and make the method a public operation.`);
+    }
+  }
+  return out;
+}
+
+/**
+ * True when some `@Confiqure.Tool` annotates a method rather than a type: the declaration it heads
+ * (the text up to the next `{` or `;`, after the annotation's own arguments) names no
+ * class/interface/record/enum.
+ */
+function hasMethodLevelTool(src: string): boolean {
+  const re = /@Confiqure\s*\.\s*Tool\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src)) !== null) {
+    let i = m.index + m[0].length;
+    while (i < src.length && /\s/.test(src[i])) i++;
+    if (src[i] === "(") i = skipBalanced(src, i);
+    const end = src.slice(i).search(/[{;]/);
+    const head = end < 0 ? src.slice(i) : src.slice(i, i + end);
+    if (!/\b(class|interface|record|enum)\b/.test(head)) return true;
+  }
+  return false;
+}
+
+/** Index just past the parenthesized group opening at `open`. */
+function skipBalanced(src: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === "(") depth++;
+    else if (src[i] === ")" && --depth === 0) return i + 1;
+  }
+  return src.length;
+}
+
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:"])\/\/[^\n]*/g, "$1");
+}
+
+/**
  * Push-time lint over the parsed Java bundle (issue #83). Two source smells that a tool resolving
  * a type by its SIMPLE NAME can't see through — and that bit confiqure's green-test in prod
  * (conv 101: a field's inner `FloorMethod` enum collided with a divergent top-level `FloorMethod`,
@@ -40,7 +94,7 @@ function endpointExtendsMissingBase(parsed: ParsedFile[]): string[] {
       if (!d.hasConfiqureAnnotation || !d.superclassName) continue;
       if (known.has(d.superclassName)) continue;
       out.push(
-        `@Confiqure class ${d.name} extends ${d.superclassName}, but ${d.superclassName}'s source ` +
+        `@Confiqure object ${d.name} extends ${d.superclassName}, but ${d.superclassName}'s source ` +
           `isn't in this push — its inherited fields will be invisible to the chat and the ` +
           `save/complete gates. Make sure ${d.superclassName} is under a scanPath.`
       );

@@ -13,6 +13,9 @@ const root = (className: string, filePath: string): DiscoveredClass =>
     classUniqueId: filePath,
     className,
     configEnd: "/" + className,
+    objectKind: "SETTING",
+    identityField: null,
+    callback: null,
     filePath,
     language: "java",
     gitSha: "sha-" + className,
@@ -40,6 +43,7 @@ function fixtureScan(): ScanResult {
     primaryLanguage: "java",
     reachableFiles: new Set(["src/dto/Supplier.java", "src/dto/Other.java"]),
     toolReachableFiles: new Set(["src/dto/ToolInput.java"]),
+    errors: [],
   };
 }
 

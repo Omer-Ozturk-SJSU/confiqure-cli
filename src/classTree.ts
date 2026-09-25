@@ -44,6 +44,9 @@ async function ensureJavaParser(): Promise<Parser> {
 
 export type DeclKind = "class" | "interface" | "enum" | "record";
 
+/** The 3.0 object kinds (annotation 3.0.0): which `@Confiqure.<X>` a class carries. */
+export type ObjectKind = "SETTING" | "LIST" | "USER_SETTING" | "USER_LIST" | "FACTS";
+
 export interface ParsedField {
   name: string;
   /** Raw type expression, e.g. "List<Channel>". */
@@ -56,12 +59,19 @@ export interface ParsedField {
   hasConfiqureTag: boolean;
   /** Raw initializer expression (right of `=`), e.g. "FloorMethod.MARGIN_PERCENT"; null if none. */
   initializer: string | null;
+  /** True if the field carries `@Confiqure.Identity` (3.0 — identifies a List record). */
+  identity: boolean;
 }
 
 export interface ParsedDecl {
   kind: DeclKind;
   name: string;
+  /** True when the type carries a 3.0 object annotation (`objectKind != null`) — an object root. */
   hasConfiqureAnnotation: boolean;
+  /** The 3.0 object annotation on the type (`@Confiqure.Setting`, `.List`, `.User.Setting`, `.User.List`, `.Facts`), else null. */
+  objectKind: ObjectKind | null;
+  /** Name of the first field carrying `@Confiqure.Identity`, else null. */
+  identityField: string | null;
   fields: ParsedField[];
   /**
    * Ancestor type names from `extends`/`implements` (#140). Superclass fields are part of the
@@ -368,7 +378,8 @@ function extractDeclaration(node: SyntaxNode): ParsedDecl | null {
   if (!nameNode) return null;
   const name = nameNode.text;
 
-  const hasConfiqureAnnotation = declarationHasConfiqure(node);
+  const objectKind = declarationObjectKind(node);
+  const hasConfiqureAnnotation = objectKind !== null;
   const superTypes = extractSuperTypes(node);
   const superclassName = extractSuperclassName(node);
 
@@ -395,7 +406,8 @@ function extractDeclaration(node: SyntaxNode): ParsedDecl | null {
     enumConstants.push(...extractEnumConstants(body));
   }
 
-  return { kind, name, hasConfiqureAnnotation, fields, superTypes, superclassName, enumConstants };
+  const identityField = fields.find((f) => f.identity)?.name ?? null;
+  return { kind, name, hasConfiqureAnnotation, objectKind, identityField, fields, superTypes, superclassName, enumConstants };
 }
 
 /**
@@ -434,20 +446,33 @@ function extractSuperTypes(node: SyntaxNode): string[] {
   return [...out];
 }
 
-function declarationHasConfiqure(node: SyntaxNode): boolean {
+/**
+ * The 3.0 object annotation on a type declaration. Matches `Confiqure.Setting`, `Confiqure.List`,
+ * `Confiqure.User.Setting`, `Confiqure.User.List`, `Confiqure.Facts` — bare or fully qualified. The
+ * `Confiqure.` qualifier is required so `java.util.List`-style names can never root a class. The
+ * pre-3.0 `@Confiqure(...)` form roots nothing; `lintSources` rejects it with a message instead.
+ */
+function declarationObjectKind(node: SyntaxNode): ObjectKind | null {
+  for (const ann of annotationsOf(node)) {
+    const m = (ann.childForFieldName("name")?.text ?? "").match(/(?:^|\.)Confiqure\.(User\.)?(Setting|List|Facts)$/);
+    if (!m) continue;
+    if (m[2] === "Facts") return "FACTS";
+    if (m[2] === "Setting") return m[1] ? "USER_SETTING" : "SETTING";
+    return m[1] ? "USER_LIST" : "LIST";
+  }
+  return null;
+}
+
+/** The annotation nodes on a declaration's (type, method, field, parameter) modifiers. */
+function annotationsOf(node: SyntaxNode): SyntaxNode[] {
+  const out: SyntaxNode[] = [];
   for (const child of node.children) {
-    if (!child) continue;
-    if (child.type !== "modifiers") continue;
+    if (!child || child.type !== "modifiers") continue;
     for (const mod of child.namedChildren) {
-      if (!mod) continue;
-      if (mod.type !== "marker_annotation" && mod.type !== "annotation") continue;
-      const annName = mod.childForFieldName("name");
-      if (!annName) continue;
-      const simple = lastSegment(annName.text);
-      if (simple === "Confiqure") return true;
+      if (mod && (mod.type === "annotation" || mod.type === "marker_annotation")) out.push(mod);
     }
   }
-  return false;
+  return out;
 }
 
 function lastSegment(name: string): string {
@@ -461,6 +486,9 @@ function extractFields(fieldDecl: SyntaxNode, doc: string | null): ParsedField[]
   const typeText = typeNode.text;
   const typeNames = collectTypeIdentifiers(typeNode);
 
+  const identity = annotationsOf(fieldDecl).some((a) =>
+    /(?:^|\.)Confiqure\.Identity$/.test(a.childForFieldName("name")?.text ?? "")
+  );
   const out: ParsedField[] = [];
   for (const child of fieldDecl.namedChildren) {
     if (!child) continue;
@@ -474,6 +502,7 @@ function extractFields(fieldDecl: SyntaxNode, doc: string | null): ParsedField[]
       doc,
       hasConfiqureTag: doc != null && /@confiqure\b/i.test(doc),
       initializer: child.childForFieldName("value")?.text ?? null,
+      identity,
     });
   }
   return out;

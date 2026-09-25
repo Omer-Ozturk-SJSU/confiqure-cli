@@ -10,17 +10,30 @@ import {
   buildClassTrees,
   collectToolReachableFiles,
   ClassTree,
+  ObjectKind,
+  ParsedDecl,
   ParsedTool,
 } from "./classTree.js";
-import { lintBundle } from "./lint.js";
+import { lintBundle, lintSources } from "./lint.js";
+
+export type { ObjectKind } from "./classTree.js";
 
 export interface DiscoveredClass {
   /** Stable identity. V1: relative file path. */
   classUniqueId: string;
   /** Top-level class name. */
   className: string;
-  /** Resolved annotation `end`; a bare `@Confiqure` (no `end`) resolves to the default endpoint "/". */
+  /**
+   * Resolved address: the annotation's `end`, else `/<snake_case class name>` (FACTS:
+   * `/facts/<snake_case>`). 3.0 has no default endpoint, so an end-less object never claims "/".
+   */
   configEnd: string;
+  /** Which 3.0 object annotation the class carries. */
+  objectKind: ObjectKind;
+  /** The `@Confiqure.Identity` field of a List object, else null. */
+  identityField: string | null;
+  /** The `callback` of a `@Confiqure.Facts` class, else null. */
+  callback: string | null;
   /** Path relative to project root. */
   filePath: string;
   /** Source language matching one of the config keys. */
@@ -74,6 +87,11 @@ export interface ScanResult {
    * DTO lives in a file no `@Confiqure` root references.
    */
   toolReachableFiles: Set<string>;
+  /**
+   * Annotation-3.0 errors (pre-3.0 forms, uncallable tool operations). Non-empty → `push` prints
+   * them and stops before uploading.
+   */
+  errors: string[];
 }
 
 interface LangBucket {
@@ -146,6 +164,10 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
   const tools: ParsedTool[] = [];
   const reachableFiles = new Set<string>();
   const toolReachableFiles = new Set<string>();
+  const declByName = new Map<string, ParsedDecl>();
+  const errors = lintSources(
+    Array.from(allFiles, ([filePath, source]) => ({ filePath, source })).filter((f) => fileLanguage.has(f.filePath))
+  );
 
   // One tree-sitter pass serves endpoint reachability, tool detection, AND
   // tool-signature reachability (the input DTO graph the Composer needs to
@@ -156,6 +178,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
     const { trees } = buildClassTrees(parsed);
     javaTrees.push(...trees);
     for (const pf of parsed) {
+      for (const d of pf.declarations) if (!declByName.has(d.name)) declByName.set(d.name, d);
       tools.push(...pf.tools);
       const src = allFiles.get(pf.filePath) ?? "";
       if (fileHasConfiqureTool(pf.declarations, src)) {
@@ -184,7 +207,11 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
   for (const tree of javaTrees) {
     const content = allFiles.get(tree.rootFile) ?? "";
     const className = tree.rootClass;
-    const configEnd = resolveConfigEnd(content, className);
+    const decl = declByName.get(className);
+    const ann = objectAnnotation(content);
+    const objectKind = decl?.objectKind ?? ann?.kind;
+    if (!objectKind) continue; // buildClassTrees roots only 3.0 objects; defensive
+    const configEnd = resolveConfigEnd(ann?.end ?? null, objectKind, className);
     // #40: the endpoint identity must cover its FULL nested type graph (root + every reachable
     // DTO), not just the root file — otherwise a change confined to a nested DTO leaves the root
     // byte-identical, the diff reports UNCHANGED, and no new schema version is cut (host ⇄ confiqure
@@ -199,6 +226,9 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
       classUniqueId: tree.rootFile,
       className,
       configEnd,
+      objectKind,
+      identityField: decl?.identityField ?? null,
+      callback: objectKind === "FACTS" ? ann?.callback ?? null : null,
       filePath: tree.rootFile,
       language: "java",
       gitSha,
@@ -214,15 +244,20 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
     if (!langKey || langKey === "java") continue;
     const bucket = buckets.find((b) => b.langKey === langKey);
     if (!bucket || !content.includes(bucket.tokenPattern)) continue;
+    const ann = objectAnnotation(content);
+    if (!ann) continue; // no 3.0 object annotation (a pre-3.0 form is reported by lintSources)
 
     const ext = extname(filePath);
     const className = basename(filePath, ext);
-    const configEnd = resolveConfigEnd(content, className);
+    const configEnd = resolveConfigEnd(ann.end, ann.kind, className);
     const gitSha = await gitHashObject(filePath, cwd).catch(() => "");
     annotated.push({
       classUniqueId: filePath,
       className,
       configEnd,
+      objectKind: ann.kind,
+      identityField: identityFieldOf(content),
+      callback: ann.callback,
       filePath,
       language: langKey,
       gitSha,
@@ -247,7 +282,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
 
   // #316 — surface recognized user-facts contracts so the developer can see the declaration took
   // effect (and at which reserved address) instead of wondering why it isn't in the endpoint list.
-  const factsClasses = annotated.filter((c) => isFactsClass(allFiles.get(c.filePath) ?? ""));
+  const factsClasses = annotated.filter((c) => c.objectKind === "FACTS");
   for (const f of factsClasses) {
     console.log(
       chalk.dim(`User-facts contract: ${f.className} → ${f.configEnd} (read-only, not a chat endpoint)`)
@@ -256,25 +291,22 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
   if (factsClasses.length > 1) {
     console.warn(
       chalk.yellow("⚠"),
-      `${factsClasses.length} classes declare \`type = FACTS\`, but a workspace has ONE user-facts ` +
+      `${factsClasses.length} classes declare \`@Confiqure.Facts\`, but a workspace has ONE user-facts ` +
         `contract — the most recently pushed one wins. Classes: ${factsClasses.map((c) => c.className).join(", ")}`
     );
   }
 
-  // A workspace can have only ONE default endpoint. A bare `@Confiqure` (no `end`) resolves
-  // to "/", so two end-less classes would both claim it — warn so the developer adds an
-  // explicit `end` to all but one (the backend keeps only one default endpoint regardless).
-  const defaults = annotated.filter((c) => c.configEnd === DEFAULT_ENDPOINT);
-  if (defaults.length > 1) {
-    console.warn(
-      chalk.yellow("⚠"),
-      `${defaults.length} classes have no \`end\` and all resolve to the default endpoint "/", ` +
-        `but a workspace can have only ONE default endpoint. Give all but one an explicit \`end\`. ` +
-        `Classes: ${defaults.map((c) => c.className).join(", ")}`
-    );
+  // Two objects on one address: the backend keeps one per address, so the other would be
+  // silently replaced. Error, so the developer gives one of them its own `end`.
+  const byEnd = new Map<string, DiscoveredClass[]>();
+  for (const c of annotated) byEnd.set(c.configEnd, [...(byEnd.get(c.configEnd) ?? []), c]);
+  for (const [end, list] of byEnd) {
+    if (list.length > 1) {
+      errors.push(`${list.map((c) => c.filePath).join(", ")}: ${list.length} objects share the address "${end}" — give each its own \`end\`.`);
+    }
   }
 
-  return { annotated, toolFiles, hookFiles, tools, allFiles, primaryLanguage, reachableFiles, toolReachableFiles };
+  return { annotated, toolFiles, hookFiles, tools, allFiles, primaryLanguage, reachableFiles, toolReachableFiles, errors };
 }
 
 /**
@@ -295,54 +327,37 @@ function fileHasCallbackHook(source: string): boolean {
   return source.includes("@Confiqure.DefaultCallbackHook") || source.includes("@DefaultCallbackHook");
 }
 
-/**
- * The workspace DEFAULT endpoint address. Per the V2 architecture doc, a bare
- * `@Confiqure` (annotation present, no `end` value) IS the workspace's default
- * endpoint — reached at configEnd "/" — NOT a class-name-derived slug. So a class
- * with no parseable `end` resolves here, matching how the backend Composer composes it.
- */
-const DEFAULT_ENDPOINT = "/";
+const OBJECT_ANNOTATION = /@Confiqure\s*\.\s*(User\s*\.\s*)?(Setting|List|Facts)\b\s*(\(([^)]*)\))?/;
 
-function extractEnd(source: string): string | null {
-  const m = source.match(/\b[Ee]nd\s*[:=]\s*["']([^"']+)["']/);
+/**
+ * The 3.0 object annotation in a source file (`@Confiqure.Setting/List`, `@Confiqure.User.Setting/List`,
+ * `@Confiqure.Facts`) with its `end` / `callback` arguments. Null for anything else — including the
+ * pre-3.0 `@Confiqure(...)` form, which `lintSources` rejects with a message.
+ */
+export function objectAnnotation(source: string): { kind: ObjectKind; end: string | null; callback: string | null } | null {
+  const m = source.match(OBJECT_ANNOTATION);
+  if (!m) return null;
+  const user = !!m[1];
+  const base = m[2];
+  const args = m[4] ?? "";
+  const str = (key: string) => args.match(new RegExp(`\\b${key}\\s*[:=]\\s*["']([^"']*)["']`))?.[1] ?? null;
+  if (base === "Facts") return { kind: "FACTS", end: null, callback: str("callback") };
+  const kind: ObjectKind = base === "Setting" ? (user ? "USER_SETTING" : "SETTING") : (user ? "USER_LIST" : "LIST");
+  return { kind, end: str("end"), callback: null };
+}
+
+/** The field carrying `@Confiqure.Identity` (source-level; Java roots use the tree-sitter parse). */
+export function identityFieldOf(source: string): string | null {
+  const m = source.match(/@Confiqure\s*\.\s*Identity\b\s*(?:@[\w.]+(?:\([^)]*\))?\s*)*(?:(?:private|protected|public|final|static|transient|val|var)\s+)*(?:[\w<>\[\],.?]+\s+)?(\w+)\s*[:=;]/);
   return m ? m[1] : null;
 }
 
-/**
- * The parenthesized arguments of the CLASS-level `@Confiqure(...)`, or null when the class is
- * unannotated or uses the bare marker form. Balanced-paren scan so a nested call or an array
- * argument doesn't truncate it. Member annotations (`@Confiqure.Tool(`, `@Confiqure.Gate(`) are
- * not matched — the pattern requires `(` directly after the name.
- */
-export function confiqureArgs(source: string): string | null {
-  const at = source.search(/@Confiqure\s*\(/);
-  if (at < 0) return null;
-  const open = source.indexOf("(", at);
-  let depth = 0;
-  for (let i = open; i < source.length; i++) {
-    if (source[i] === "(") depth++;
-    else if (source[i] === ")") {
-      depth--;
-      if (depth === 0) return source.slice(open + 1, i);
-    }
-  }
-  return null;
-}
-
-/**
- * #316 — is this the host's USER-FACTS contract (`@Confiqure(type = FACTS, callback = "...")`)?
- * Accepts every spelling the annotation admits across languages: `Confiqure.Type.FACTS`,
- * `Type.FACTS`, a static-imported bare `FACTS`, and the quoted `"facts"` the non-Java sources use.
- * Scoped to the annotation's own arguments so an ordinary `this.type = ...` in the class body can
- * never be mistaken for a declaration.
- */
-export function isFactsClass(source: string): boolean {
-  const args = confiqureArgs(source);
-  if (!args) return false;
-  const m = args.match(/\btype\s*[:=]\s*["']?([\w.$]+)["']?/);
-  if (!m) return false;
-  const last = m[1].split(".").pop() ?? "";
-  return last.toUpperCase() === "FACTS";
+function snakeCase(className: string): string {
+  return className
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
 }
 
 /**
@@ -353,17 +368,11 @@ export function isFactsClass(source: string): boolean {
  * logs. An explicitly declared `end` still wins (the developer asked for it).
  */
 export function factsEndpoint(className: string): string {
-  const snake = className
-    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-    .replace(/[^A-Za-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .toLowerCase();
-  return `/facts/${snake || "user_facts"}`;
+  return `/facts/${snakeCase(className) || "user_facts"}`;
 }
 
-/** Resolved address for one scanned root: declared `end` → FACTS reserved address → default "/". */
-function resolveConfigEnd(source: string, className: string): string {
-  const declared = extractEnd(source);
-  if (declared) return declared;
-  return isFactsClass(source) ? factsEndpoint(className) : DEFAULT_ENDPOINT;
+/** Resolved address for one object: declared `end` → FACTS reserved address → `/<snake_case class name>`. */
+function resolveConfigEnd(end: string | null, kind: ObjectKind, className: string): string {
+  if (end) return end;
+  return kind === "FACTS" ? factsEndpoint(className) : `/${snakeCase(className) || "object"}`;
 }

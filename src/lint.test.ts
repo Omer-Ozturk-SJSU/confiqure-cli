@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseJavaFiles } from "./classTree.js";
-import { lintBundle } from "./lint.js";
+import { lintBundle, lintSources } from "./lint.js";
 
 async function lint(files: Record<string, string>): Promise<string[]> {
   const parsed = await parseJavaFiles(new Map(Object.entries(files)));
@@ -79,7 +79,7 @@ describe("lintBundle (#83 — simple-name enum collisions + bad enum defaults)",
 describe("lintBundle (#140 — @Confiqure root extends a base absent from the push)", () => {
   it("warns when the base class source isn't in the bundle", async () => {
     const warnings = await lint({
-      "AsinDiscovery.java": `@ai.confiqure.annotation.Confiqure
+      "AsinDiscovery.java": `@ai.confiqure.annotation.Confiqure.List(end = "/d")
         public class AsinDiscovery extends Discovery { private String extra; }`,
       // Discovery.java is intentionally NOT in the bundle (out of scanPaths).
     });
@@ -89,7 +89,7 @@ describe("lintBundle (#140 — @Confiqure root extends a base absent from the pu
 
   it("is silent when the base IS in the bundle", async () => {
     const warnings = await lint({
-      "AsinDiscovery.java": `@ai.confiqure.annotation.Confiqure
+      "AsinDiscovery.java": `@ai.confiqure.annotation.Confiqure.List(end = "/d")
         public class AsinDiscovery extends Discovery { private String extra; }`,
       "Discovery.java": `public class Discovery { private Integer minSalesRank; }`,
     });
@@ -105,9 +105,32 @@ describe("lintBundle (#140 — @Confiqure root extends a base absent from the pu
 
   it("does not warn on `implements` (only `extends` carries invisible instance fields)", async () => {
     const warnings = await lint({
-      "Root.java": `@ai.confiqure.annotation.Confiqure
+      "Root.java": `@ai.confiqure.annotation.Confiqure.List(end = "/d")
         public class Root implements java.io.Serializable { private String x; }`,
     });
     expect(warnings.some((w) => w.includes("isn't in this push"))).toBe(false);
+  });
+});
+
+describe("lintSources (3.0 — pre-3.0 annotation forms are rejected before upload)", () => {
+  it("rejects the pre-3.0 class form and method-level @Tool", () => {
+    const errors = lintSources([
+      { filePath: "a/X.java", source: `@Confiqure(end = "/x")\nclass X {}` },
+      { filePath: "a/T.java", source: `class T { @Confiqure.Tool(name="x") public String x() { return null; } }` },
+    ]);
+    expect(errors).toContain('a/X.java: `@Confiqure(...)` on a class is not supported since annotation 3.0 — use @Confiqure.Setting / @Confiqure.List / @Confiqure.User.Setting / @Confiqure.User.List (or @Confiqure.Facts).');
+    expect(errors).toContain('a/T.java: `@Confiqure.Tool` on a method is not supported since annotation 3.0 — declare a tool CLASS (annotate the class) and make the method a public operation.');
+  });
+  it("rejects the bare pre-3.0 @Confiqure marker", () => {
+    expect(lintSources([{ filePath: "a/B.java", source: `@Confiqure\npublic class B {}` }])).toHaveLength(1);
+  });
+  it("accepts the 3.0 forms, a class-level @Confiqure.Tool, and mentions inside comments", () => {
+    const errors = lintSources([
+      { filePath: "a/L.java", source: `import ai.confiqure.annotation.Confiqure;\n@Confiqure.List(end = "/l")\nclass L { @Confiqure.Identity private String sku; }` },
+      { filePath: "a/U.java", source: `@Confiqure.User.Setting\nclass U {}` },
+      { filePath: "a/F.java", source: `@Confiqure.Facts(callback = "/f")\nclass F {}` },
+      { filePath: "a/T.java", source: `/** FLOW. Old style was @Confiqure(end = "/x"). */\n@Confiqure.Tool(name = "T")\n@RestController\n@RequestMapping("/api")\npublic class T {\n  @PostMapping("/a") public String a(@RequestBody Q q) { return null; }\n}` },
+    ]);
+    expect(errors).toEqual([]);
   });
 });

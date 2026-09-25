@@ -14,7 +14,7 @@ import { parseJavaFiles, buildClassTrees, collectToolReachableFiles } from "./cl
 const ASIN_DISCOVERY = `
 package dtos.confiqure.restocker;
 import ai.confiqure.annotation.Confiqure;
-@Confiqure(end = "/asin-discovery")
+@Confiqure.List(end = "/asin-discovery")
 public class AsinDiscovery extends Discovery {
     private OfferSpecifics offerSpecifics;
 }`;
@@ -124,7 +124,7 @@ describe("buildClassTrees — #141 no kitchen-sink", () => {
 describe("buildClassTrees — #140 interface `extends`/`implements`", () => {
   it("includes an implemented interface's source and follows the interface `extends` chain", async () => {
     const files = {
-      "Root.java": `@ai.confiqure.annotation.Confiqure
+      "Root.java": `@ai.confiqure.annotation.Confiqure.Setting
         public class Root implements Auditable {
           private String name;
         }`,
@@ -139,7 +139,7 @@ describe("buildClassTrees — #140 interface `extends`/`implements`", () => {
 
   it("does NOT pull in a type referenced only by an interface METHOD signature (avoids #141 bloat)", async () => {
     const files = {
-      "Root.java": `@ai.confiqure.annotation.Confiqure
+      "Root.java": `@ai.confiqure.annotation.Confiqure.Setting
         public class Root implements HasAudit { private String name; }`,
       "HasAudit.java": `public interface HasAudit { AuditReport getReport(Controller c); }`,
       "AuditReport.java": `public class AuditReport { private String s; }`,
@@ -170,5 +170,28 @@ describe("collectToolReachableFiles — #140 follow `extends` from tool DTOs", (
     expect(reach).toContain("CreateReq.java");
     expect(reach).toContain("BaseReq.java");
     expect(reach).toContain("Payload.java");
+  });
+});
+
+describe("buildClassTrees — 3.0 object roots", () => {
+  it("roots only 3.0 object annotations and carries kind + identity field", async () => {
+    const files = {
+      "L.java": `@Confiqure.List(end = "/l")\npublic class L { @Confiqure.Identity private String sku; private Part p; }`,
+      "S.java": `@ai.confiqure.annotation.Confiqure.User.Setting\npublic class S { private String a; }`,
+      "F.java": `@Confiqure.Facts(callback = "/f")\npublic class F { private String a; }`,
+      "Part.java": `public class Part { private String x; }`,
+      "Old.java": `@Confiqure(end = "/old")\npublic class Old { private String a; }`,
+      "T.java": `@Confiqure.Tool(name = "T")\npublic class T { }`,
+    };
+    const parsed = await parseJavaFiles(new Map(Object.entries(files)));
+    const { trees } = buildClassTrees(parsed);
+    expect(trees.map((t) => t.rootClass).sort()).toEqual(["F", "L", "S"]);
+    const decls = new Map(parsed.flatMap((p) => p.declarations).map((d) => [d.name, d]));
+    expect(decls.get("L")!.objectKind).toBe("LIST");
+    expect(decls.get("L")!.identityField).toBe("sku");
+    expect(decls.get("S")!.objectKind).toBe("USER_SETTING");
+    expect(decls.get("F")!.objectKind).toBe("FACTS");
+    expect(decls.get("Part")!.objectKind).toBeNull();
+    expect(decls.get("Old")!.objectKind).toBeNull();
   });
 });
