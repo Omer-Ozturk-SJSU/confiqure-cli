@@ -22,19 +22,36 @@ confiqure status      # check the most recent push result
 
 ## How the scan works
 
-`confiqure push` parses each `@Confiqure`-annotated class with tree-sitter, walks the field-type graph, and ships every file transitively reachable from a root — not just the file with the annotation on it. This means nested configuration classes (e.g. `EmailPreferences` referenced from a root `NotificationPreferences`) come along automatically, without needing their own `@Confiqure` tag.
+Since CLI 1.0 the scan reads the **annotation 3.0** vocabulary (`ai.confiqure:confiqure-annotation-java` 3.0.0):
+
+| annotation | on | pushed as |
+|---|---|---|
+| `@Confiqure.Setting(end)` / `@Confiqure.List(end)` | class | an object (one record / many records per organization) |
+| `@Confiqure.User.Setting(end)` / `@Confiqure.User.List(end)` | class | the per-user pair |
+| `@Confiqure.Identity` | a field of a List object | the field that identifies a record |
+| `@Confiqure.Facts(callback)` | class | the user-facts contract |
+| `@Confiqure.Tool(name)` | class | a tool class: its Javadoc is the flow, every public method one operation |
+| `@Confiqure.Browser` / `@Confiqure.Async` | a tool-class method | runs in the page / result delivered later |
+
+An operation's URL comes from Spring: the class `@RequestMapping` joined with the method's `@PostMapping` / `@GetMapping` / `@PutMapping` / `@DeleteMapping`. A public method with neither a mapping nor `@Confiqure.Browser` stops the push. So do the pre-3.0 forms — `@Confiqure(end = …)` on a class and `@Confiqure.Tool` on a method — each with a message naming the file and the replacement. An object without `end` gets `/<snake_case class name>`.
+
+`confiqure push` parses each class with tree-sitter, walks the field-type graph, and ships every file transitively reachable from it — for an object its field types, for a tool class the input and return DTOs of its operations. Nested classes (e.g. `EmailPreferences` referenced from `NotificationPreferences`) come along automatically without an annotation of their own. Objects and tool classes are both diffed by path and content, so only what changed is uploaded.
+
+Tools are registered by `confiqure push`; `confiqure tools set` is retired (`tools list` / `tools delete` remain).
 
 Sample push output:
 
 ```
-Scanned 10 files; 1 @Confiqure root.
+Scanned 12 files; 1 object, 1 tool class.
 
+⏵ Tool class: ListingsTool — 3 reachable files
+    ├─ src/main/java/com/example/Listing.java              referenced
+    ├─ src/main/java/com/example/ListingsTool.java         root
+    └─ src/main/java/com/example/TitleQuery.java           referenced
 ⏵ Root: NotificationPreferences — 10 reachable files
     ├─ src/main/java/com/example/notifications/NotificationPreferences.java  root
     ├─ src/main/java/com/example/notifications/EmailPreferences.java         referenced
-    ├─ src/main/java/com/example/notifications/AlertPreferences.java         referenced
-    ├─ src/main/java/com/example/model/Channel.java                          referenced
-    └─ … (6 more)
+    └─ … (8 more)
 ```
 
 ## Supported languages

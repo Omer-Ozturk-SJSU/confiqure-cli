@@ -100,8 +100,9 @@ export function registerPush(program: Command): void {
       // workspaceKey is the registered key; the backend authorizes it for the
       // paired sandbox via ApiKeyAuthHelper.authorizedFor.
       const targetWorkspaceKey = sandboxWorkspaceKey(creds.workspaceKey);
-      const toolCount = scan.toolFiles.length;
-      console.log(chalk.dim(`Scanned ${scan.allFiles.size} files; ${scan.annotated.length} @Confiqure root${scan.annotated.length === 1 ? "" : "s"}, ${toolCount} @Confiqure.Tool controller${toolCount === 1 ? "" : "s"}.`));
+      const toolCount = scan.toolClasses.length;
+      const objectCount = scan.annotated.length - toolCount;
+      console.log(chalk.dim(`Scanned ${scan.allFiles.size} files; ${objectCount} object${objectCount === 1 ? "" : "s"}, ${toolCount} tool class${toolCount === 1 ? "" : "es"}.`));
 
       // Show the class tree per root so the user can see exactly which files
       // we'll ship and why — covers the case the keyword scan used to miss
@@ -220,73 +221,25 @@ export function registerPush(program: Command): void {
       const headSha = await gitHeadSha(cwd);
       const ref = await gitRef(cwd);
 
-      // Ship only the files reachable from the endpoints that actually CHANGED
-      // in this push — not every root in scanPaths. Unchanged sibling endpoints
-      // already live on the backend; re-bundling them made the backend re-record
-      // them as NESTED rows (and bloated every upload). diff.changes is derived
-      // from scan.annotated, and --force/--file narrow scan.annotated first, so
-      // this stays correct for those paths too.
-      const changedClassIds = new Set(
-        diff.changes.filter((c) => c.op !== "DELETED").map((c) => c.classUniqueId)
-      );
-      const uploadSet = new Set<string>();
-      for (const root of scan.annotated) {
-        if (changedClassIds.has(root.classUniqueId)) {
-          for (const f of root.relatedFiles) uploadSet.add(f);
-        }
+      // Ship only what CHANGED: each changed object's / tool class's reachable files (+ hook files).
+      const fileShas = new Map<string, string>();
+      for (const path of uploadPathsOf(scan, diff.changes)) {
+        fileShas.set(path, await gitHashObject(path, cwd).catch(() => ""));
       }
-      // Always ship @Confiqure.DefaultCallbackHook files (like tool controllers,
-      // they're workspace-level context) so the backend/Composer can discover the
-      // callback hook path wherever it lives — not only inside a scanned root/tool.
-      for (const hf of scan.hookFiles) uploadSet.add(hf.filePath);
-      // And every file reachable from a TOOL signature (input DTO + return type
-      // graphs) — the Composer derives each tool's input schema from these; a DTO
-      // in its own file previously shipped only if an endpoint referenced it.
-      for (const f of scan.toolReachableFiles) uploadSet.add(f);
-      const uploadPaths = Array.from(uploadSet).sort();
-      const files: ManifestFileEntry[] = [];
-      for (const path of uploadPaths) {
-        const sha = await gitHashObject(path, cwd).catch(() => "");
-        files.push({ path, sha });
-      }
-      const shaCount = files.filter((f) => f.sha !== "").length;
-      console.log(chalk.dim(`Git SHAs computed for ${shaCount}/${files.length} files.`));
-
-      const toolFileEntries: ManifestFileEntry[] = scan.toolFiles.map((tf) => ({
-        path: tf.filePath,
-        sha: tf.gitSha,
-      }));
-
-      const manifest: Manifest = {
+      const manifest = buildManifest(scan, {
+        changes: diff.changes,
         workspaceKey: targetWorkspaceKey,
         gitRef: ref,
         headSha,
-        language: scan.primaryLanguage,
-        changes: diff.changes,
-        files,
-        toolFiles: toolFileEntries.length > 0 ? toolFileEntries : undefined,
-        toolClasses: scan.toolClasses.length > 0
-          ? scan.toolClasses.map((tc) => ({
-              name: tc.name,
-              className: tc.className,
-              classUniqueId: tc.classUniqueId,
-              doc: tc.doc,
-              operations: tc.operations.map((op) => ({ ...op })),
-            }))
-          : undefined,
-      };
+        fileShas,
+      });
+      const shaCount = manifest.files.filter((f) => f.sha !== "").length;
+      console.log(chalk.dim(`Git SHAs computed for ${shaCount}/${manifest.files.length} files.`));
 
-      // Ship only the files actually referenced by an annotated root + tool controllers.
       const uploadFiles = new Map<string, string>();
-      for (const p of uploadPaths) {
-        const content = scan.allFiles.get(p);
-        if (content != null) uploadFiles.set(p, content);
-      }
-      for (const tf of scan.toolFiles) {
-        if (!uploadFiles.has(tf.filePath)) {
-          const content = scan.allFiles.get(tf.filePath);
-          if (content != null) uploadFiles.set(tf.filePath, content);
-        }
+      for (const f of manifest.files) {
+        const content = scan.allFiles.get(f.path);
+        if (content != null) uploadFiles.set(f.path, content);
       }
       const result = await postUpload(creds, manifest, uploadFiles, targetWorkspaceKey, opts.force === true);
       console.log();
@@ -382,6 +335,62 @@ export function registerPush(program: Command): void {
           chalk.cyan(`confiqure push --production`)
       );
     });
+}
+
+/**
+ * The files one push ships: every changed object's and tool class's reachable files (the tool
+ * class source + the DTOs its operations reach), plus the `@Confiqure.DefaultCallbackHook` files.
+ * Unchanged siblings already live on the backend — re-bundling them made it re-record them as
+ * NESTED rows. DELETED entries ship nothing.
+ */
+export function uploadPathsOf(scan: ScanResult, changes: ChangeEntry[]): string[] {
+  const changed = new Set(changes.filter((c) => c.op !== "DELETED").map((c) => c.classUniqueId));
+  const paths = new Set<string>();
+  for (const root of scan.annotated) {
+    if (changed.has(root.classUniqueId)) for (const f of root.relatedFiles) paths.add(f);
+  }
+  for (const hf of scan.hookFiles) paths.add(hf.filePath);
+  return Array.from(paths).sort();
+}
+
+/**
+ * The upload manifest for `changes` (default: every scanned class, as `--force` sends it).
+ * `toolClasses` carries only the tool classes among the changes, with their operations.
+ */
+export function buildManifest(
+  scan: ScanResult,
+  opts: {
+    changes?: ChangeEntry[];
+    workspaceKey?: string;
+    gitRef?: string;
+    headSha?: string;
+    fileShas?: Map<string, string>;
+  } = {}
+): Manifest {
+  const changes = opts.changes ?? forceAllChanged(scan.annotated).changes;
+  const changed = new Set(changes.filter((c) => c.op !== "DELETED").map((c) => c.classUniqueId));
+  const toolClasses = scan.toolClasses
+    .filter((tc) => changed.has(tc.classUniqueId))
+    .map((tc) => ({
+      name: tc.name,
+      className: tc.className,
+      classUniqueId: tc.classUniqueId,
+      doc: tc.doc,
+      operations: tc.operations.map((op) => ({ ...op })),
+    }));
+  const toolFiles: ManifestFileEntry[] = scan.toolFiles
+    .filter((tf) => changed.has(tf.filePath))
+    .map((tf) => ({ path: tf.filePath, sha: tf.gitSha }));
+  return {
+    workspaceKey: opts.workspaceKey ?? "",
+    gitRef: opts.gitRef ?? "",
+    headSha: opts.headSha ?? "",
+    language: scan.primaryLanguage,
+    changes,
+    files: uploadPathsOf(scan, changes).map((path) => ({ path, sha: opts.fileShas?.get(path) ?? "" })),
+    toolFiles: toolFiles.length > 0 ? toolFiles : undefined,
+    toolClasses: toolClasses.length > 0 ? toolClasses : undefined,
+  };
 }
 
 /**
@@ -546,12 +555,10 @@ async function runPromote(
  * a nested file some root reaches, we push the owning root(s) so the nested
  * edit propagates.
  *
- * #120: `toolFiles`/`tools`/`toolReachableFiles`/`hookFiles` are NOT narrowed
- * here. Tools are workspace-level, not per-endpoint — reachability is
- * directional (DTOs never reference controllers), so a tool controller is
- * outside every endpoint root's relatedFiles and a naive scope-to-root would
- * silently drop every tool from a selective push. The full-tree scan already
- * found them; leave them as-is so the sweep always ships regardless of `--file`.
+ * #120: `toolFiles`/`toolClasses`/`toolReachableFiles`/`hookFiles` are NOT
+ * narrowed here. Since CLI 1.0 a tool class is a root of its own in `annotated`
+ * (TOOL_CLASS), so `--file` can target it; the manifest ships only the tool
+ * classes among the diff's changes, and a selective push never deletes.
  */
 export function scopeToFile(scan: ScanResult, fileArg: string): void {
   const norm = (p: string) => p.replace(/\\/g, "/");
@@ -627,14 +634,15 @@ function forceAllChanged(annotated: DiscoveredClass[]): DiffResult {
 function renderTrees(scan: ScanResult): string {
   const lines: string[] = [];
   if (scan.annotated.length === 0) {
-    lines.push(chalk.yellow("⚠ No @Confiqure roots found in scanPaths."));
+    lines.push(chalk.yellow("⚠ No @Confiqure objects or tool classes found in scanPaths."));
     return lines.join("\n");
   }
 
   for (const root of scan.annotated) {
     const lang = root.language === "java" ? "" : chalk.dim(` (${root.language})`);
+    const kind = root.objectKind === "TOOL_CLASS" ? "Tool class" : "Root";
     lines.push(
-      `${chalk.cyan("⏵")} Root: ${chalk.bold(root.className)}${lang} — ${root.relatedFiles.length} reachable file${root.relatedFiles.length === 1 ? "" : "s"}`
+      `${chalk.cyan("⏵")} ${kind}: ${chalk.bold(root.className)}${lang} — ${root.relatedFiles.length} reachable file${root.relatedFiles.length === 1 ? "" : "s"}`
     );
 
     const sortedFiles = [...root.relatedFiles].sort();

@@ -7,7 +7,8 @@ export interface ChangeEntry {
   op: ChangeOp;
   classUniqueId: string;
   className: string;
-  configEnd: string;
+  /** Null for a tool class (no address). */
+  configEnd: string | null;
   filePath: string;
   previousFilePath?: string;
   previousClassUniqueId?: string;

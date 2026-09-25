@@ -26,10 +26,11 @@ export interface DiscoveredClass {
   /**
    * Resolved address: the annotation's `end`, else `/<snake_case class name>` (FACTS:
    * `/facts/<snake_case>`). 3.0 has no default endpoint, so an end-less object never claims "/".
+   * Null for a tool class — it has no address.
    */
-  configEnd: string;
-  /** Which 3.0 object annotation the class carries. */
-  objectKind: ObjectKind;
+  configEnd: string | null;
+  /** Which 3.0 object annotation the class carries, or TOOL_CLASS for a `@Confiqure.Tool` class. */
+  objectKind: ObjectKind | "TOOL_CLASS";
   /** The `@Confiqure.Identity` field of a List object, else null. */
   identityField: string | null;
   /** The `callback` of a `@Confiqure.Facts` class, else null. */
@@ -58,7 +59,10 @@ export interface ToolFile {
 }
 
 export interface ScanResult {
-  /** Object roots (one per 3.0 object annotation). */
+  /**
+   * Every pushable class: the object roots (one per 3.0 object annotation) AND the tool classes
+   * (`objectKind` TOOL_CLASS). Both are diffed against the registry by classUniqueId + gitSha.
+   */
   annotated: DiscoveredClass[];
   /** Source files of the `@Confiqure.Tool` classes. */
   toolFiles: ToolFile[];
@@ -196,6 +200,27 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
     for (const f of collectToolReachableFiles(parsed, toolClasses)) {
       toolReachableFiles.add(f);
     }
+    // A tool class is pushed like an object: its identity covers the class file + every DTO its
+    // operations reach, so a DTO edit re-versions the tool class.
+    for (const tc of toolClasses) {
+      const reach = Array.from(new Set([tc.sourceFile, ...collectToolReachableFiles(parsed, [tc])]));
+      const fileShas = await Promise.all(
+        reach.map(async (p) => ({ path: p, sha: await gitHashObject(p, cwd).catch(() => "") }))
+      );
+      annotated.push({
+        classUniqueId: tc.classUniqueId,
+        className: tc.className,
+        configEnd: null,
+        objectKind: "TOOL_CLASS",
+        identityField: null,
+        callback: null,
+        filePath: tc.sourceFile,
+        language: "java",
+        gitSha: endpointIdentity(fileShas),
+        relatedFiles: reach,
+        visitedClasses: [tc.className],
+      });
+    }
     errors.push(...lintToolClasses(toolClasses));
 
     // Push-time lint (#83): warn on simple-name enum collisions / bad enum defaults the host can't
@@ -300,7 +325,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
   // Two objects on one address: the backend keeps one per address, so the other would be
   // silently replaced. Error, so the developer gives one of them its own `end`.
   const byEnd = new Map<string, DiscoveredClass[]>();
-  for (const c of annotated) byEnd.set(c.configEnd, [...(byEnd.get(c.configEnd) ?? []), c]);
+  for (const c of annotated) if (c.configEnd) byEnd.set(c.configEnd, [...(byEnd.get(c.configEnd) ?? []), c]);
   for (const [end, list] of byEnd) {
     if (list.length > 1) {
       errors.push(`${list.map((c) => c.filePath).join(", ")}: ${list.length} objects share the address "${end}" — give each its own \`end\`.`);

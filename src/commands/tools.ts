@@ -1,13 +1,12 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import { readFile } from "node:fs/promises";
 import { requireCredentials } from "../credentials.js";
-import { listTools, upsertTool, deleteTool, ApiError } from "../api.js";
+import { listTools, deleteTool, ApiError } from "../api.js";
 
 export function registerTools(program: Command): void {
   const tools = program
     .command("tools")
-    .description("List, register, or remove workspace tools (URL + instructions)");
+    .description("List or remove workspace tools (declare new ones as @Confiqure.Tool classes)");
 
   tools
     .command("list")
@@ -17,10 +16,7 @@ export function registerTools(program: Command): void {
       const items = await listTools(creds);
       if (items.length === 0) {
         console.log(chalk.dim("(no tools registered)"));
-        console.log(
-          chalk.dim("Add one with: ") +
-            chalk.cyan("confiqure tools set <name> [--url <url>] --instructions \"...\"")
-        );
+        console.log(chalk.dim("Declare a @Confiqure.Tool class and run `confiqure push` to register its operations."));
         return;
       }
       for (const t of items) {
@@ -32,52 +28,18 @@ export function registerTools(program: Command): void {
       }
     });
 
+  // Retired in CLI 1.0: tools are declared in code (annotation 3.0) and registered on push.
   tools
     .command("set <name>")
-    .description(
-      "Create or update a tool. --url is required when creating a server-side tool; " +
-        "browser tools have none, so omit it and send only instructions."
-    )
-    .option("--url <url>", "Tool callback URL the backend will POST to (server-side tools only)")
-    .option(
-      "--instructions <text>",
-      "Free-text guidance for the AI: what the tool does, when to invoke it"
-    )
-    .option(
-      "--instructions-file <path>",
-      "Read instructions from a file (e.g. instructions.md) — overrides --instructions"
-    )
-    .action(
-      async (
-        name: string,
-        opts: { url?: string; instructions?: string; instructionsFile?: string }
-      ) => {
-        const creds = await requireCredentials();
-        let instructions: string | null = opts.instructions ?? null;
-        if (opts.instructionsFile) {
-          instructions = (await readFile(opts.instructionsFile, "utf8")).trim();
-        }
-        try {
-          const saved = await upsertTool(creds, name, opts.url, instructions);
-          // A browser tool has no callback URL; printing "undefined" is how a placeholder
-          // ends up being typed in the first place.
-          console.log(
-            chalk.green("✓"),
-            saved.url ? `${saved.name} → ${saved.url}` : `${saved.name} ${chalk.dim("(browser tool)")}`
-          );
-          if (saved.instructions) {
-            const first = saved.instructions.split(/\r?\n/)[0] ?? "";
-            console.log(chalk.dim(`  ${first}`));
-          }
-        } catch (e) {
-          if (e instanceof ApiError) {
-            console.error(chalk.red("✗"), `set ${name} failed (${e.status}): ${e.message}`);
-            process.exit(1);
-          }
-          throw e;
-        }
-      }
-    );
+    .description("Retired — declare tools as @Confiqure.Tool classes; `confiqure push` registers them")
+    .allowUnknownOption()
+    .action(() => {
+      console.error(
+        chalk.red("✗"),
+        "Since CLI 1.0 tools are declared in code as @Confiqure.Tool classes and registered on push; this command is retired."
+      );
+      process.exit(1);
+    });
 
   tools
     .command("delete <name>")

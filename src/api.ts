@@ -327,31 +327,6 @@ export async function listTools(creds: Credentials): Promise<ToolItem[]> {
   return (await res.json()) as ToolItem[];
 }
 
-export async function upsertTool(
-  creds: Credentials,
-  name: string,
-  url: string | undefined,
-  instructions: string | null
-): Promise<ToolItem> {
-  const res = await fetch(
-    `${creds.apiBase}/api/${creds.workspaceKey}/cli/tools/${encodeURIComponent(name)}`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${creds.token}`,
-        "Content-Type": "application/json",
-      },
-      // url is OMITTED when absent (JSON.stringify drops an undefined value) so the backend
-      // leaves an existing tool's url alone — never sent as the string "undefined".
-      body: JSON.stringify({ url: url || undefined, instructions: instructions ?? null }),
-    }
-  );
-  if (!res.ok) {
-    throw new ApiError(res.status, `PUT /cli/tools/${name} failed: ${res.status} ${await res.text()}`);
-  }
-  return (await res.json()) as ToolItem;
-}
-
 export async function deleteTool(creds: Credentials, name: string): Promise<void> {
   const res = await fetch(
     `${creds.apiBase}/api/${creds.workspaceKey}/cli/tools/${encodeURIComponent(name)}`,
