@@ -168,7 +168,8 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
   const toolClasses: ParsedToolClass[] = [];
   const reachableFiles = new Set<string>();
   const toolReachableFiles = new Set<string>();
-  const declByName = new Map<string, ParsedDecl>();
+  // Keyed by file + name: two objects may share a simple name in different packages.
+  const declByFile = new Map<string, ParsedDecl>();
   const errors = lintSources(
     Array.from(allFiles, ([filePath, source]) => ({ filePath, source })).filter((f) => fileLanguage.has(f.filePath))
   );
@@ -182,7 +183,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
     const { trees } = buildClassTrees(parsed);
     javaTrees.push(...trees);
     for (const pf of parsed) {
-      for (const d of pf.declarations) if (!declByName.has(d.name)) declByName.set(d.name, d);
+      for (const d of pf.declarations) declByFile.set(`${pf.filePath}#${d.name}`, d);
       toolClasses.push(...pf.toolClasses);
       const src = allFiles.get(pf.filePath) ?? "";
       if (pf.toolClasses.length > 0) {
@@ -233,7 +234,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
   for (const tree of javaTrees) {
     const content = allFiles.get(tree.rootFile) ?? "";
     const className = tree.rootClass;
-    const decl = declByName.get(className);
+    const decl = declByFile.get(`${tree.rootFile}#${className}`);
     const ann = objectAnnotation(content);
     const objectKind = decl?.objectKind ?? ann?.kind;
     if (!objectKind) continue; // buildClassTrees roots only 3.0 objects; defensive

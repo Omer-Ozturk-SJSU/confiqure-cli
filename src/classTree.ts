@@ -145,6 +145,10 @@ export interface ParsedToolClass {
 export interface ParsedFile {
   filePath: string;
   packageName: string | null;
+  /** Import targets as written, without `import`/`static`/`;` (e.g. `a.b.Foo`, `a.b.*`). */
+  imports: string[];
+  /** Every type declared in the file, nested ones included (they shadow same-named types elsewhere). */
+  typeNames: string[];
   declarations: ParsedDecl[];
   toolClasses: ParsedToolClass[];
   /** Every enum in the file, including nested ones, with their enclosing-type chain (lint input). */
@@ -230,7 +234,9 @@ function extractFile(filePath: string, root: SyntaxNode): ParsedFile {
   const enums: EnumDecl[] = [];
   collectEnums(root, [], enums);
 
-  return { filePath, packageName, declarations, toolClasses, enums };
+  const typeNames: string[] = [];
+  collectTypeNames(root, typeNames);
+  return { filePath, packageName, imports, typeNames, declarations, toolClasses, enums };
 }
 
 /**
@@ -255,6 +261,15 @@ function collectEnums(node: SyntaxNode, enclosing: string[], out: EnumDecl[]): v
       const body = child.childForFieldName("body");
       if (body) collectEnums(body, [...enclosing, name], out);
     }
+  }
+}
+
+function collectTypeNames(node: SyntaxNode, out: string[]): void {
+  for (const child of node.namedChildren) {
+    if (!child || !isTypeDeclaration(child.type)) continue;
+    out.push(child.childForFieldName("name")?.text ?? "");
+    const body = child.childForFieldName("body");
+    if (body) collectTypeNames(body, out);
   }
 }
 
@@ -500,6 +515,27 @@ function extractDeclaration(node: SyntaxNode, imports: string[] = []): ParsedDec
       pendingDoc = null;
     }
   }
+  if (kind === "record") {
+    // A record's state is its components (`record R(Period period, List<Figure> figures)`), not
+    // field declarations — read them as fields so the walk follows their types.
+    for (const param of node.childForFieldName("parameters")?.namedChildren ?? []) {
+      if (!param || param.type !== "formal_parameter") continue;
+      const typeNode = param.childForFieldName("type");
+      const nameNode = param.childForFieldName("name");
+      if (!typeNode || !nameNode) continue;
+      fields.push({
+        name: nameNode.text,
+        typeText: typeNode.text,
+        typeNames: collectTypeIdentifiers(typeNode),
+        doc: null,
+        hasConfiqureTag: false,
+        initializer: null,
+        identity: annotationsOf(param).some(
+          (a) => confiqureName(a.childForFieldName("name")?.text ?? "", imports) === "Identity"
+        ),
+      });
+    }
+  }
   if (body && kind === "enum") {
     // Closed value set for downstream schema/scaffold generation (real enums, not bare strings).
     enumConstants.push(...extractEnumConstants(body));
@@ -623,8 +659,12 @@ function collectTypeIdentifiers(node: SyntaxNode): string[] {
     if (!n) return;
     if (n.type === "type_identifier") {
       out.push(n.text);
-    } else if (n.type === "scoped_type_identifier") {
-      out.push(lastSegment(n.text));
+      return;
+    }
+    if (n.type === "scoped_type_identifier") {
+      // Keep the qualifier (`a.b.Foo`, `Outer.Inner`) — resolution needs it; its segments aren't types.
+      out.push(n.text.replace(/\s+/g, ""));
+      return;
     }
     for (const c of n.namedChildren) visit(c);
   };
@@ -649,54 +689,111 @@ function collectTypeIdentifiers(node: SyntaxNode): string[] {
  * sub-block of the parent, they wouldn't have annotated it.)
  */
 export function buildClassTrees(parsed: ParsedFile[]): BuildClassTreesResult {
-  const classNameToDecl = new Map<string, { file: string; decl: ParsedDecl }>();
+  const index = buildTypeIndex(parsed);
+  const trees: ClassTree[] = [];
   for (const pf of parsed) {
     for (const decl of pf.declarations) {
-      if (!classNameToDecl.has(decl.name)) {
-        classNameToDecl.set(decl.name, { file: pf.filePath, decl });
-      }
+      if (!decl.hasConfiqureAnnotation) continue;
+      const reachableFiles = new Set<string>();
+      const visitedClasses: string[] = [];
+      walkTypes(index, [{ file: pf, decl }], reachableFiles, visitedClasses);
+      trees.push({ rootFile: pf.filePath, rootClass: decl.name, reachableFiles, visitedClasses });
     }
   }
-
-  const rootCandidates: { file: string; decl: ParsedDecl }[] = [];
-  for (const pf of parsed) {
-    for (const decl of pf.declarations) {
-      if (decl.hasConfiqureAnnotation) rootCandidates.push({ file: pf.filePath, decl });
-    }
-  }
-
-  const trees: ClassTree[] = rootCandidates.map(({ file, decl }) => {
-    const reachableFiles = new Set<string>();
-    const visitedClasses: string[] = [];
-    const stack: string[] = [decl.name];
-
-    while (stack.length > 0) {
-      const className = stack.pop()!;
-      const found = classNameToDecl.get(className);
-      if (!found) continue;
-      if (reachableFiles.has(found.file)) continue;
-      reachableFiles.add(found.file);
-      visitedClasses.push(className);
-      // Ancestors first (#140): a subclass endpoint inherits the base's config fields, so the
-      // base source AND its referenced types must ship. Walked for every kind (interfaces
-      // `extends` interfaces; records `implements`).
-      for (const t of found.decl.superTypes) stack.push(t);
-      if (found.decl.kind === "class" || found.decl.kind === "record") {
-        for (const field of found.decl.fields) {
-          for (const t of field.typeNames) stack.push(t);
-        }
-      }
-    }
-
-    return {
-      rootFile: file,
-      rootClass: decl.name,
-      reachableFiles,
-      visitedClasses,
-    };
-  });
-
   return { trees };
+}
+
+/** One top-level type of the project, keyed by its file. */
+interface TypeEntry {
+  file: ParsedFile;
+  decl: ParsedDecl;
+}
+
+interface TypeIndex {
+  /** `package.Name` (or `Name` in the default package) → the type(s); more than one only when two files repeat a name in one package. */
+  byFqcn: Map<string, TypeEntry[]>;
+  /** Simple name → EVERY type with that name (never first-wins). */
+  bySimple: Map<string, TypeEntry[]>;
+}
+
+function buildTypeIndex(parsed: ParsedFile[]): TypeIndex {
+  const byFqcn = new Map<string, TypeEntry[]>();
+  const bySimple = new Map<string, TypeEntry[]>();
+  for (const file of parsed) {
+    for (const decl of file.declarations) {
+      const entry = { file, decl };
+      const fqcn = file.packageName ? `${file.packageName}.${decl.name}` : decl.name;
+      byFqcn.set(fqcn, [...(byFqcn.get(fqcn) ?? []), entry]);
+      bySimple.set(decl.name, [...(bySimple.get(decl.name) ?? []), entry]);
+    }
+  }
+  return { byFqcn, bySimple };
+}
+
+/** The longest dotted prefix of `name` that is a project type (`a.b.Outer.Inner` → `a.b.Outer`). */
+function byQualifiedPrefix(index: TypeIndex, name: string): TypeEntry[] {
+  const parts = name.split(".");
+  for (let n = parts.length; n > 0; n--) {
+    const hit = index.byFqcn.get(parts.slice(0, n).join("."));
+    if (hit) return hit;
+  }
+  return [];
+}
+
+/**
+ * Resolve a type reference the way javac does, from the file that names it: a type the file
+ * declares (nested included) → a single-type import → the file's own package → on-demand (`.*`)
+ * imports. Qualified names resolve by package. Resolution is by PATH, never by simple name, so a
+ * same-named class elsewhere can't shadow the right one. A reference nothing decides (default
+ * package, unresolved wildcard) ships EVERY project type of that simple name — over-shipping a DTO
+ * costs bytes; dropping one made the engine check replies against the wrong class.
+ */
+function resolveType(index: TypeIndex, ref: string, from: ParsedFile): TypeEntry[] {
+  let simple = ref;
+  if (ref.includes(".")) {
+    const qualified = byQualifiedPrefix(index, ref);
+    if (qualified.length > 0) return qualified;
+    simple = ref.split(".")[0]; // `Outer.Inner` → resolve `Outer`
+  }
+  if (from.typeNames.includes(simple)) {
+    const own = from.declarations.find((d) => d.name === simple) ?? from.declarations[0];
+    return own ? [{ file: from, decl: own }] : [];
+  }
+  for (const imp of from.imports) {
+    if (imp.endsWith(".*")) continue;
+    if (imp === simple || imp.endsWith(`.${simple}`)) {
+      return byQualifiedPrefix(index, imp); // empty: imported from a library → not a project type
+    }
+  }
+  const samePackage = index.byFqcn.get(from.packageName ? `${from.packageName}.${simple}` : simple);
+  if (samePackage) return samePackage;
+  const onDemand = from.imports
+    .filter((i) => i.endsWith(".*"))
+    .flatMap((i) => byQualifiedPrefix(index, `${i.slice(0, -2)}.${simple}`))
+    .filter((e) => e.decl.name === simple);
+  if (onDemand.length > 0) return onDemand;
+  return index.bySimple.get(simple) ?? [];
+}
+
+/**
+ * Transitive closure over field / record-component / ancestor types, each resolved from the file
+ * that names it. Files are the unit: a file reached once is walked once.
+ */
+function walkTypes(index: TypeIndex, start: TypeEntry[], reachable: Set<string>, visitedClasses: string[]): void {
+  const stack = [...start];
+  while (stack.length > 0) {
+    const { file, decl } = stack.pop()!;
+    if (reachable.has(file.filePath)) continue;
+    reachable.add(file.filePath);
+    visitedClasses.push(decl.name);
+    // Ancestors first (#140): a subclass inherits the base's fields, so the base source AND its
+    // referenced types must ship. Walked for every kind (interfaces extend interfaces; records implement).
+    const refs = [...decl.superTypes];
+    if (decl.kind === "class" || decl.kind === "record") {
+      for (const field of decl.fields) refs.push(...field.typeNames);
+    }
+    for (const ref of refs) stack.push(...resolveType(index, ref, file));
+  }
 }
 
 /**
@@ -710,37 +807,24 @@ export function collectToolReachableFiles(
   parsed: ParsedFile[],
   toolClasses: ParsedToolClass[],
 ): Set<string> {
-  const classNameToDecl = new Map<string, { file: string; decl: ParsedDecl }>();
-  for (const pf of parsed) {
-    for (const decl of pf.declarations) {
-      if (!classNameToDecl.has(decl.name)) {
-        classNameToDecl.set(decl.name, { file: pf.filePath, decl });
-      }
-    }
-  }
-
-  const reachable = new Set<string>();
-  const stack: string[] = [];
-  // Every identifier in a signature type — `List<Listing>` → List, Listing; non-project ones fall away.
+  const index = buildTypeIndex(parsed);
+  const byPath = new Map(parsed.map((pf) => [pf.filePath, pf]));
+  const start: TypeEntry[] = [];
   for (const tc of toolClasses) {
+    const from = byPath.get(tc.sourceFile);
+    if (!from) continue;
     for (const op of tc.operations) {
-      for (const t of [op.inputType, op.returnType]) stack.push(...(t?.match(/[A-Za-z_$][\w$]*/g) ?? []));
-    }
-  }
-  const visited = new Set<string>();
-  while (stack.length > 0) {
-    const className = stack.pop()!;
-    if (visited.has(className)) continue;
-    visited.add(className);
-    const found = classNameToDecl.get(className);
-    if (!found) continue; // non-project type (String, ResponseEntity, …)
-    reachable.add(found.file);
-    for (const t of found.decl.superTypes) stack.push(t); // #140: follow a tool DTO's ancestors too
-    if (found.decl.kind === "class" || found.decl.kind === "record") {
-      for (const field of found.decl.fields) {
-        for (const t of field.typeNames) stack.push(t);
+      // Every (possibly qualified) name in the signature — `ResponseEntity<SalesSummary>`,
+      // `Optional<Q>`, `Mono<Set<T>>`, `Beta[]` — resolved from the tool class's own file. Wrappers
+      // (ResponseEntity, Optional, CompletableFuture, Mono, List, Set) are not project types and fall away.
+      for (const t of [op.inputType, op.returnType]) {
+        for (const ref of t?.match(/[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*/g) ?? []) {
+          start.push(...resolveType(index, ref.replace(/\s+/g, ""), from));
+        }
       }
     }
   }
+  const reachable = new Set<string>();
+  walkTypes(index, start, reachable, []);
   return reachable;
 }

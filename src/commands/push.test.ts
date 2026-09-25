@@ -103,3 +103,33 @@ describe("buildManifest (CLI 1.0 — tool classes ship with their DTOs)", () => 
     expect(objectOnly.files.map((f) => f.path)).toEqual(["src/ListingRepricing.java"]);
   });
 });
+
+describe("buildManifest 1.0.1 — two SalesSummary classes in different packages both ship (row 4747)", () => {
+  it("the tool's record and the object's part are both in the manifest files", async () => {
+    const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = await mkdtemp(join(tmpdir(), "cq-101-"));
+    try {
+      const put = async (p: string, src: string) => {
+        await mkdir(join(dir, p, ".."), { recursive: true });
+        await writeFile(join(dir, p), src);
+      };
+      await put("src/c/d/SalesSummary.java", `package c.d;\npublic class SalesSummary { private Integer units; }`);
+      await put("src/c/d/Stock.java", `package c.d;\nimport ai.confiqure.Confiqure;\n@Confiqure.Setting(end = "/stock")\npublic class Stock { private SalesSummary summary; }`);
+      await put("src/a/b/SalesSummary.java", `package a.b;\npublic record SalesSummary(boolean ok, String message) {}`);
+      await put("src/t/SalesTool.java", `package t;\nimport ai.confiqure.Confiqure;\nimport a.b.SalesSummary;\n@Confiqure.Tool(name = "SalesTool")\n@RequestMapping("/api")\npublic class SalesTool {\n  @PostMapping("/s") public ResponseEntity<SalesSummary> s(@RequestBody Q q) { return null; }\n}`);
+      const cwd = dir;
+      const scan = await scanProject(cwd, { ...(await loadConfig(cwd)), scanPaths: ["src"], guides: [] });
+      const manifest = buildManifest(scan);
+      const paths = manifest.files.map((f) => f.path);
+      expect(paths).toEqual(expect.arrayContaining(["src/a/b/SalesSummary.java", "src/c/d/SalesSummary.java"]));
+      const tool = manifest.changes.find((c) => c.objectKind === "TOOL_CLASS")!;
+      expect(tool.relatedFiles!.sort()).toEqual(["src/a/b/SalesSummary.java", "src/t/SalesTool.java"]);
+      const stock = manifest.changes.find((c) => c.className === "Stock")!;
+      expect(stock.relatedFiles!.sort()).toEqual(["src/c/d/SalesSummary.java", "src/c/d/Stock.java"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -312,3 +312,72 @@ describe("3.0 review fixes", () => {
     expect(decls.get("E")).toMatchObject({ objectKind: "FACTS", objectCallback: "/f" });
   });
 });
+
+describe("1.0.1 — signature DTOs resolve by path, through wrappers and records (row 4747)", () => {
+  // The inventory SalesSummary comes FIRST so a simple-name, first-wins map would bind to it.
+  const FILES: Record<string, string> = {
+    "dtos/inventory/SalesSummary.java": `package dtos.inventory;
+      public class SalesSummary { private Integer units; }`,
+    "dtos/inventory/InventoryReport.java": `package dtos.inventory;
+      import ai.confiqure.Confiqure;
+      @Confiqure.Setting(end = "/inventory")
+      public class InventoryReport { private SalesSummary summary; }`,
+    "tools/salesinfo/SalesInfoTool.java": `package tools.salesinfo;
+      import ai.confiqure.Confiqure;
+      import tools.salesinfo.dto.SalesSummary;
+      import tools.salesinfo.dto.*;
+      @Confiqure.Tool(name = "SalesInfoTool")
+      @RequestMapping("/api/sales")
+      public class SalesInfoTool {
+        @PostMapping("/summary") public ResponseEntity<SalesSummary> summary(@RequestBody Optional<PeriodQuery> q) { return null; }
+        @PostMapping("/a") public CompletableFuture<List<Alpha>> a(@RequestBody Beta[] b) { return null; }
+        @PostMapping("/m") public Mono<Set<Gamma>> m(@RequestBody tools.salesinfo.dto.Delta d) { return null; }
+      }`,
+    "tools/salesinfo/dto/SalesSummary.java": `package tools.salesinfo.dto;
+      public record SalesSummary(boolean ok, String message, Period period, List<Figure> figures) {}`,
+    "tools/salesinfo/dto/Period.java": `package tools.salesinfo.dto;
+      public record Period(String from, String to) {}`,
+    "tools/salesinfo/dto/Figure.java": `package tools.salesinfo.dto;
+      public class Figure { private Money amount; }`,
+    "tools/salesinfo/dto/Money.java": `package tools.salesinfo.dto;
+      public record Money(String amount, String currency) {}`,
+    "tools/salesinfo/dto/PeriodQuery.java": `package tools.salesinfo.dto;
+      public record PeriodQuery(String period) {}`,
+    "tools/salesinfo/dto/Alpha.java": `package tools.salesinfo.dto; public class Alpha {}`,
+    "tools/salesinfo/dto/Beta.java": `package tools.salesinfo.dto; public class Beta {}`,
+    "tools/salesinfo/dto/Gamma.java": `package tools.salesinfo.dto; public class Gamma {}`,
+    "tools/salesinfo/dto/Delta.java": `package tools.salesinfo.dto; public class Delta {}`,
+  };
+
+  it("the tool class reaches its own SalesSummary record and everything the record names — not the inventory one", async () => {
+    const parsed = await parseJavaFiles(new Map(Object.entries(FILES)));
+    const reach = collectToolReachableFiles(parsed, parsed.flatMap((p) => p.toolClasses));
+    expect([...reach].sort()).toEqual([
+      "tools/salesinfo/dto/Alpha.java",
+      "tools/salesinfo/dto/Beta.java",
+      "tools/salesinfo/dto/Delta.java",
+      "tools/salesinfo/dto/Figure.java",
+      "tools/salesinfo/dto/Gamma.java",
+      "tools/salesinfo/dto/Money.java",
+      "tools/salesinfo/dto/Period.java",
+      "tools/salesinfo/dto/PeriodQuery.java",
+      "tools/salesinfo/dto/SalesSummary.java",
+    ]);
+  });
+
+  it("the object reaches the inventory SalesSummary (same package), not the tool's", async () => {
+    const parsed = await parseJavaFiles(new Map(Object.entries(FILES)));
+    const tree = buildClassTrees(parsed).trees.find((t) => t.rootClass === "InventoryReport")!;
+    expect([...tree.reachableFiles].sort()).toEqual(["dtos/inventory/InventoryReport.java", "dtos/inventory/SalesSummary.java"]);
+  });
+
+  it("a same-named type that no import or package decides ships every candidate", async () => {
+    const parsed = await parseJavaFiles(new Map(Object.entries({
+      "x/Thing.java": `public class Thing { private String a; }`,
+      "y/Thing.java": `public class Thing { private String b; }`,
+      "Root.java": `@Confiqure.Setting(end = "/r") public class Root { private Thing thing; }`,
+    })));
+    const tree = buildClassTrees(parsed).trees.find((t) => t.rootClass === "Root")!;
+    expect([...tree.reachableFiles].sort()).toEqual(["Root.java", "x/Thing.java", "y/Thing.java"]);
+  });
+});
