@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { factsEndpoint, isTestPath, objectAnnotation, identityFieldOf } from "./scan.js";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { factsEndpoint, isTestPath, objectAnnotation, identityFieldOf, scanProject } from "./scan.js";
+import { DEFAULT_CONFIG } from "./config.js";
 
 describe("factsEndpoint (#316 — a facts class must never claim the default endpoint)", () => {
   it("derives a reserved snake_case address from the class name", () => {
@@ -46,5 +50,24 @@ describe("3.0 vocabulary", () => {
   });
   it("identityFieldOf is null when no field carries @Confiqure.Identity", () => {
     expect(identityFieldOf(`@Confiqure.List(end = "/x")\nclass X { private String a; }`)).toBeNull();
+  });
+});
+
+describe("scanProject — two objects on one address (review finding 2)", () => {
+  it("is a warning, not a push-blocking error", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cq-dup-"));
+    await mkdir(join(dir, "src"));
+    await writeFile(join(dir, "src/A.java"), `@Confiqure.Setting(end = "/same")\npublic class A { private String a; }`);
+    await writeFile(join(dir, "src/B.java"), `@Confiqure.Setting(end = "/same")\npublic class B { private String b; }`);
+    const scan = await scanProject(dir, { ...DEFAULT_CONFIG, scanPaths: ["src"] });
+    expect(scan.annotated.map((c) => c.configEnd)).toEqual(["/same", "/same"]);
+    expect(scan.errors).toEqual([]);
+  });
+  it("takes end from a bare imported annotation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cq-bare-"));
+    await mkdir(join(dir, "src"));
+    await writeFile(join(dir, "src/A.java"), `import ai.confiqure.Confiqure.List;\n@List(end = "/bare")\npublic class A { private String a; }`);
+    const scan = await scanProject(dir, { ...DEFAULT_CONFIG, scanPaths: ["src"] });
+    expect(scan.annotated.map((c) => [c.configEnd, c.objectKind])).toEqual([["/bare", "LIST"]]);
   });
 });

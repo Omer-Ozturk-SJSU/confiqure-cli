@@ -237,7 +237,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
     const ann = objectAnnotation(content);
     const objectKind = decl?.objectKind ?? ann?.kind;
     if (!objectKind) continue; // buildClassTrees roots only 3.0 objects; defensive
-    const configEnd = resolveConfigEnd(ann?.end ?? null, objectKind, className);
+    const configEnd = resolveConfigEnd(decl?.objectEnd ?? ann?.end ?? null, objectKind, className);
     // #40: the endpoint identity must cover its FULL nested type graph (root + every reachable
     // DTO), not just the root file — otherwise a change confined to a nested DTO leaves the root
     // byte-identical, the diff reports UNCHANGED, and no new schema version is cut (host ⇄ confiqure
@@ -254,7 +254,7 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
       configEnd,
       objectKind,
       identityField: decl?.identityField ?? null,
-      callback: objectKind === "FACTS" ? ann?.callback ?? null : null,
+      callback: objectKind === "FACTS" ? decl?.objectCallback ?? ann?.callback ?? null : null,
       filePath: tree.rootFile,
       language: "java",
       gitSha,
@@ -323,12 +323,16 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
   }
 
   // Two objects on one address: the backend keeps one per address, so the other would be
-  // silently replaced. Error, so the developer gives one of them its own `end`.
+  // silently replaced. Warn (advisory, as before 3.0) so the developer gives each its own `end`.
   const byEnd = new Map<string, DiscoveredClass[]>();
   for (const c of annotated) if (c.configEnd) byEnd.set(c.configEnd, [...(byEnd.get(c.configEnd) ?? []), c]);
   for (const [end, list] of byEnd) {
     if (list.length > 1) {
-      errors.push(`${list.map((c) => c.filePath).join(", ")}: ${list.length} objects share the address "${end}" — give each its own \`end\`.`);
+      console.warn(
+        chalk.yellow("⚠"),
+        `${list.length} objects share the address "${end}", but the backend keeps one object per address. ` +
+          `Give each its own \`end\`. Classes: ${list.map((c) => c.className).join(", ")}`
+      );
     }
   }
 

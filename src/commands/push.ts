@@ -376,7 +376,16 @@ export function buildManifest(
       className: tc.className,
       classUniqueId: tc.classUniqueId,
       doc: tc.doc,
-      operations: tc.operations.map((op) => ({ ...op })),
+      operations: tc.operations.map((op) => ({
+        name: op.name,
+        httpMethod: op.httpMethod,
+        path: op.path,
+        browser: op.browser,
+        async: op.async,
+        inputType: op.inputType,
+        returnType: op.returnType,
+        doc: op.doc,
+      })),
     }));
   const toolFiles: ManifestFileEntry[] = scan.toolFiles
     .filter((tf) => changed.has(tf.filePath))

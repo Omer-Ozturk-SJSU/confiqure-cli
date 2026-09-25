@@ -1,6 +1,6 @@
 package demo;
 
-import ai.confiqure.annotation.Confiqure;
+import ai.confiqure.Confiqure;
 import java.util.List;
 import org.springframework.web.bind.annotation.*;
 

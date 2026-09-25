@@ -14,7 +14,7 @@ import { lintToolClasses } from "./lint.js";
 // The annotated endpoint — its own fields are thin; the CORE lives on the base (#140).
 const ASIN_DISCOVERY = `
 package dtos.confiqure.restocker;
-import ai.confiqure.annotation.Confiqure;
+import ai.confiqure.Confiqure;
 @Confiqure.List(end = "/asin-discovery")
 public class AsinDiscovery extends Discovery {
     private OfferSpecifics offerSpecifics;
@@ -125,7 +125,7 @@ describe("buildClassTrees — #141 no kitchen-sink", () => {
 describe("buildClassTrees — #140 interface `extends`/`implements`", () => {
   it("includes an implemented interface's source and follows the interface `extends` chain", async () => {
     const files = {
-      "Root.java": `@ai.confiqure.annotation.Confiqure.Setting
+      "Root.java": `@ai.confiqure.Confiqure.Setting
         public class Root implements Auditable {
           private String name;
         }`,
@@ -140,7 +140,7 @@ describe("buildClassTrees — #140 interface `extends`/`implements`", () => {
 
   it("does NOT pull in a type referenced only by an interface METHOD signature (avoids #141 bloat)", async () => {
     const files = {
-      "Root.java": `@ai.confiqure.annotation.Confiqure.Setting
+      "Root.java": `@ai.confiqure.Confiqure.Setting
         public class Root implements HasAudit { private String name; }`,
       "HasAudit.java": `public interface HasAudit { AuditReport getReport(Controller c); }`,
       "AuditReport.java": `public class AuditReport { private String s; }`,
@@ -157,7 +157,7 @@ describe("buildClassTrees — #140 interface `extends`/`implements`", () => {
 describe("collectToolReachableFiles — tool-class DTOs ship with their ancestors and generics", () => {
   it("walks an operation's input DTO ancestor chain and unwraps a generic return type", async () => {
     const files = {
-      "ToolCtl.java": `@ai.confiqure.annotation.Confiqure.Tool(name = "ToolCtl")
+      "ToolCtl.java": `@ai.confiqure.Confiqure.Tool(name = "ToolCtl")
         @RequestMapping("/api")
         public class ToolCtl {
           @PostMapping("/run")
@@ -180,7 +180,7 @@ describe("buildClassTrees — 3.0 object roots", () => {
   it("roots only 3.0 object annotations and carries kind + identity field", async () => {
     const files = {
       "L.java": `@Confiqure.List(end = "/l")\npublic class L { @Confiqure.Identity private String sku; private Part p; }`,
-      "S.java": `@ai.confiqure.annotation.Confiqure.User.Setting\npublic class S { private String a; }`,
+      "S.java": `@ai.confiqure.Confiqure.User.Setting\npublic class S { private String a; }`,
       "F.java": `@Confiqure.Facts(callback = "/f")\npublic class F { private String a; }`,
       "Part.java": `public class Part { private String x; }`,
       "Old.java": `@Confiqure(end = "/old")\npublic class Old { private String a; }`,
@@ -255,7 +255,7 @@ describe("tool classes (3.0)", () => {
   it("a bare @Async is Spring's unless the file imports Confiqure's", async () => {
     const spring = await parseOne("c/S.java", `@Confiqure.Tool public class S { @Async @PostMapping("/x") public Ack x(@RequestBody Q q) { return null; } }`);
     expect(spring.toolClasses[0].operations[0].async).toBe(false);
-    const ours = await parseOne("c/O.java", `import ai.confiqure.annotation.Confiqure.Async;\n@Confiqure.Tool public class O { @Async @PostMapping("/x") public Ack x(@RequestBody Q q) { return null; } }`);
+    const ours = await parseOne("c/O.java", `import ai.confiqure.Confiqure.Async;\n@Confiqure.Tool public class O { @Async @PostMapping("/x") public Ack x(@RequestBody Q q) { return null; } }`);
     expect(ours.toolClasses[0].operations[0].async).toBe(true);
   });
 
@@ -267,6 +267,48 @@ describe("tool classes (3.0)", () => {
   it("lint: a public operation with neither a mapping nor @Browser is an error", () => {
     const errors = lintToolClasses([{ name: "T", className: "T", classUniqueId: "a/T.java", doc: "x", sourceFile: "a/T.java",
       operations: [{ name: "orphan", httpMethod: null, path: null, browser: false, async: false, inputType: "Q", returnType: "R", doc: null }] }]);
-    expect(errors).toEqual(["a/T.java: operation `orphan` has no Spring mapping (@PostMapping/@GetMapping/…) and is not @Confiqure.Browser — confiqure cannot call it."]);
+    expect(errors).toEqual(["a/T.java: operation `orphan` has no @PostMapping and is not @Confiqure.Browser — confiqure cannot call it."]);
+  });
+});
+
+describe("3.0 review fixes", () => {
+  it("POST-only: a tool-class operation with Get/Put/Delete/Patch mapping is an error", async () => {
+    const src = `@Confiqure.Tool(name = "Shop")
+    @RequestMapping("/api")
+    public class ShopTool {
+      @PostMapping("/ok") public Ack ok(@RequestBody Q q) { return null; }
+      @GetMapping("/g") public Ack g() { return null; }
+      @PutMapping("/p") public Ack p(@RequestBody Q q) { return null; }
+      @DeleteMapping("/d") public Ack d(@RequestBody Q q) { return null; }
+      @PatchMapping("/pa") public Ack pa(@RequestBody Q q) { return null; }
+      @RequestMapping(value = "/rm", method = RequestMethod.GET) public Ack rm() { return null; }
+      @RequestMapping("/rm-plain") public Ack rmPlain(@RequestBody Q q) { return null; }
+    }`;
+    const tc = (await parseOne("s/ShopTool.java", src)).toolClasses[0];
+    expect(lintToolClasses([tc])).toEqual([
+      "s/ShopTool.java: 3.0 operations use @PostMapping; Shop.g declares @GetMapping.",
+      "s/ShopTool.java: 3.0 operations use @PostMapping; Shop.p declares @PutMapping.",
+      "s/ShopTool.java: 3.0 operations use @PostMapping; Shop.d declares @DeleteMapping.",
+      "s/ShopTool.java: 3.0 operations use @PostMapping; Shop.pa declares @PatchMapping.",
+      "s/ShopTool.java: 3.0 operations use @PostMapping; Shop.rm declares @RequestMapping(method = GET).",
+      "s/ShopTool.java: 3.0 operations use @PostMapping; Shop.rmPlain declares @RequestMapping.",
+    ]);
+  });
+
+  it("bare @Setting/@List/@User.Setting/@Identity count when imported from ai.confiqure.Confiqure", async () => {
+    const files = {
+      "A.java": `import ai.confiqure.Confiqure.List;\nimport ai.confiqure.Confiqure.Identity;\n@List(end = "/a")\npublic class A { @Identity private String sku; }`,
+      "B.java": `import ai.confiqure.Confiqure.*;\n@Setting\npublic class B { private String x; }`,
+      "C.java": `import ai.confiqure.Confiqure.User;\n@User.Setting(end = "/c")\npublic class C { private String x; }`,
+      "D.java": `import java.util.List;\n@List\npublic class D { private String x; }`,
+      "E.java": `import ai.confiqure.Confiqure.Facts;\n@Facts(callback = "/f")\npublic class E { private String x; }`,
+    };
+    const parsed = await parseJavaFiles(new Map(Object.entries(files)));
+    const decls = new Map(parsed.flatMap((p) => p.declarations).map((d) => [d.name, d]));
+    expect(decls.get("A")).toMatchObject({ objectKind: "LIST", identityField: "sku", objectEnd: "/a" });
+    expect(decls.get("B")).toMatchObject({ objectKind: "SETTING", objectEnd: null });
+    expect(decls.get("C")).toMatchObject({ objectKind: "USER_SETTING", objectEnd: "/c" });
+    expect(decls.get("D")!.objectKind).toBeNull();
+    expect(decls.get("E")).toMatchObject({ objectKind: "FACTS", objectCallback: "/f" });
   });
 });

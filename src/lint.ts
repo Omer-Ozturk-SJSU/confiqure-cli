@@ -1,12 +1,20 @@
 import type { EnumDecl, ParsedFile, ParsedToolClass } from "./classTree.js";
 
-/** A public operation confiqure can't reach — no Spring mapping and not a browser operation — is an error. */
+/**
+ * Tool-class operation errors: a public operation confiqure can't reach (no Spring mapping and not a
+ * browser operation), and one mapped by anything but `@PostMapping` — 3.0 operations are POST only,
+ * so `@Get/Put/Delete/PatchMapping` and a method-level `@RequestMapping` are all errors.
+ */
 export function lintToolClasses(classes: ParsedToolClass[]): string[] {
   const out: string[] = [];
   for (const tc of classes) {
     for (const op of tc.operations) {
       if (!op.browser && !op.path) {
-        out.push(`${tc.sourceFile}: operation \`${op.name}\` has no Spring mapping (@PostMapping/@GetMapping/…) and is not @Confiqure.Browser — confiqure cannot call it.`);
+        out.push(`${tc.sourceFile}: operation \`${op.name}\` has no @PostMapping and is not @Confiqure.Browser — confiqure cannot call it.`);
+      } else if (op.mapping && op.mapping !== "PostMapping") {
+        const declared =
+          op.mapping === "RequestMapping" && op.httpMethod !== "POST" ? `@RequestMapping(method = ${op.httpMethod})` : `@${op.mapping}`;
+        out.push(`${tc.sourceFile}: 3.0 operations use @PostMapping; ${tc.name}.${op.name} declares ${declared}.`);
       }
     }
   }
@@ -35,30 +43,50 @@ export function lintSources(files: { filePath: string; source: string }[]): stri
 }
 
 /**
- * True when some `@Confiqure.Tool` annotates a method rather than a type: the declaration it heads
- * (the text up to the next `{` or `;`, after the annotation's own arguments) names no
- * class/interface/record/enum.
+ * True when some `@Confiqure.Tool` annotates a method rather than a type. Decided by the declaration
+ * the annotation attaches to: skip the annotation block that follows (each annotation's arguments
+ * bracket-balanced, strings skipped) and the modifiers, then the next word is `class` / `interface` /
+ * `record` / `enum` for a type — anything else is a method signature.
  */
 function hasMethodLevelTool(src: string): boolean {
   const re = /@Confiqure\s*\.\s*Tool\b/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
     let i = m.index + m[0].length;
-    while (i < src.length && /\s/.test(src[i])) i++;
-    if (src[i] === "(") i = skipBalanced(src, i);
-    const end = src.slice(i).search(/[{;]/);
-    const head = end < 0 ? src.slice(i) : src.slice(i, i + end);
-    if (!/\b(class|interface|record|enum)\b/.test(head)) return true;
+    for (;;) {
+      i = skipSpace(src, i);
+      if (src[i] === "(") {
+        i = skipBalanced(src, i);
+        continue;
+      }
+      const ann = /^@\s*[\w$.]+/.exec(src.slice(i));
+      if (ann && !/^@\s*interface\b/.test(ann[0])) {
+        i += ann[0].length;
+        continue;
+      }
+      break;
+    }
+    const words = src.slice(i).match(/^(?:(?:public|protected|private|abstract|static|final|sealed|non-sealed|strictfp)\s+)*(@\s*interface|\w+)/);
+    const keyword = words?.[1] ?? "";
+    if (!/^(class|interface|record|enum|@\s*interface)$/.test(keyword)) return true;
   }
   return false;
 }
 
-/** Index just past the parenthesized group opening at `open`. */
+function skipSpace(src: string, i: number): number {
+  while (i < src.length && /\s/.test(src[i])) i++;
+  return i;
+}
+
+/** Index just past the parenthesized group opening at `open`; string and char literals are skipped. */
 function skipBalanced(src: string, open: number): number {
   let depth = 0;
   for (let i = open; i < src.length; i++) {
-    if (src[i] === "(") depth++;
-    else if (src[i] === ")" && --depth === 0) return i + 1;
+    const c = src[i];
+    if (c === '"' || c === "'") {
+      for (i++; i < src.length && src[i] !== c; i++) if (src[i] === "\\") i++;
+    } else if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) return i + 1;
   }
   return src.length;
 }

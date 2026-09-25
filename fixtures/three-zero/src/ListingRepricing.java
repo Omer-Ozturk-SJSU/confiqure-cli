@@ -1,6 +1,6 @@
 package demo;
 
-import ai.confiqure.annotation.Confiqure;
+import ai.confiqure.Confiqure;
 
 /** Repricing rules for one listing. */
 @Confiqure.List(end = "/listing-repricing")

@@ -70,6 +70,10 @@ export interface ParsedDecl {
   hasConfiqureAnnotation: boolean;
   /** The 3.0 object annotation on the type (`@Confiqure.Setting`, `.List`, `.User.Setting`, `.User.List`, `.Facts`), else null. */
   objectKind: ObjectKind | null;
+  /** The object annotation's `end` argument, else null. */
+  objectEnd: string | null;
+  /** The `@Confiqure.Facts` `callback` argument, else null. */
+  objectCallback: string | null;
   /** Name of the first field carrying `@Confiqure.Identity`, else null. */
   identityField: string | null;
   fields: ParsedField[];
@@ -108,7 +112,9 @@ export interface ParsedOperation {
   /** Method name. */
   name: string;
   /** From the Spring mapping; null for a `@Confiqure.Browser` operation without one. */
-  httpMethod: "POST" | "GET" | "PUT" | "DELETE" | null;
+  httpMethod: "POST" | "GET" | "PUT" | "DELETE" | "PATCH" | null;
+  /** The Spring mapping annotation's simple name (`PostMapping`, `GetMapping`, …); null without one. */
+  mapping: string | null;
   /** Class `@RequestMapping` path + method mapping path, joined; null without a mapping. */
   path: string | null;
   /** `@Confiqure.Browser` — runs in the page. */
@@ -211,7 +217,7 @@ function extractFile(filePath: string, root: SyntaxNode): ParsedFile {
     if (child.type === "package_declaration") {
       packageName = extractPackageName(child);
     } else if (isTypeDeclaration(child.type)) {
-      const decl = extractDeclaration(child);
+      const decl = extractDeclaration(child, imports);
       if (decl) declarations.push(decl);
       const tc = extractToolClass(child, pendingDoc, filePath, imports);
       if (tc) toolClasses.push(tc);
@@ -294,7 +300,8 @@ function extractToolClass(typeNode: SyntaxNode, doc: string | null, filePath: st
       continue;
     }
     if (m.type === "method_declaration" && isPublic(m)) {
-      const mapping = (["PostMapping", "GetMapping", "PutMapping", "DeleteMapping", "RequestMapping"] as const)
+      // Every Spring mapping is read so lintToolClasses can name a non-POST one (3.0: POST only).
+      const mapping = (["PostMapping", "GetMapping", "PutMapping", "DeleteMapping", "PatchMapping", "RequestMapping"] as const)
         .map((n) => ({ n, a: findAnnotation(m, n) }))
         .find((x) => x.a !== null);
       let httpMethod: ParsedOperation["httpMethod"] = null;
@@ -309,6 +316,7 @@ function extractToolClass(typeNode: SyntaxNode, doc: string | null, filePath: st
       operations.push({
         name: m.childForFieldName("name")?.text ?? "",
         httpMethod,
+        mapping: mapping?.n ?? null,
         path,
         browser: findConfiqureAnnotation(m, "Browser", imports) !== null,
         async: findConfiqureAnnotation(m, "Async", imports) !== null,
@@ -332,12 +340,23 @@ function isPublic(method: SyntaxNode): boolean {
  * a bare `@Async` is otherwise Spring's.
  */
 function findConfiqureAnnotation(node: SyntaxNode, simple: string, imports: string[]): SyntaxNode | null {
-  const bareOk = imports.some((i) => i.endsWith(`Confiqure.${simple}`) || i.endsWith("Confiqure.*"));
   for (const ann of annotationsOf(node)) {
-    const n = ann.childForFieldName("name")?.text ?? "";
-    if (new RegExp(`(?:^|\\.)Confiqure\\.${simple}$`).test(n) || (bareOk && n === simple)) return ann;
+    if (confiqureName(ann.childForFieldName("name")?.text ?? "", imports) === simple) return ann;
   }
   return null;
+}
+
+/**
+ * An annotation name as a member of `ai.confiqure.Confiqure` (`User.Setting`, `Identity`, …), or
+ * null. Qualified (`Confiqure.X`, `ai.confiqure.Confiqure.X`) always counts; a bare `X` / `User.X`
+ * only when the file imports `ai.confiqure.Confiqure.X` (or `.User`, or `.*`) — so `java.util.List`
+ * or Spring's `@Async` never do.
+ */
+function confiqureName(name: string, imports: string[]): string | null {
+  const q = name.match(/(?:^|\.)Confiqure\.(.+)$/);
+  if (q) return q[1];
+  const first = name.split(".")[0];
+  return imports.some((i) => i === `ai.confiqure.Confiqure.${first}` || i === "ai.confiqure.Confiqure.*") ? name : null;
 }
 
 /** An annotation whose simple name is `simple` (e.g. Spring's `PostMapping`, qualified or not). */
@@ -358,7 +377,7 @@ function mappingPath(ann: SyntaxNode | null): string | null {
 /** `@RequestMapping(method = RequestMethod.GET)` → GET; no `method` → POST. */
 function requestMethodOf(ann: SyntaxNode): ParsedOperation["httpMethod"] {
   const raw = annotationRawArg(ann, "method");
-  const m = raw?.match(/\b(POST|GET|PUT|DELETE)\b/);
+  const m = raw?.match(/\b(POST|GET|PUT|DELETE|PATCH)\b/);
   return m ? (m[1] as ParsedOperation["httpMethod"]) : "POST";
 }
 
@@ -443,7 +462,7 @@ function extractPackageName(node: SyntaxNode): string | null {
   return null;
 }
 
-function extractDeclaration(node: SyntaxNode): ParsedDecl | null {
+function extractDeclaration(node: SyntaxNode, imports: string[] = []): ParsedDecl | null {
   const kind: DeclKind =
     node.type === "class_declaration"
       ? "class"
@@ -457,7 +476,8 @@ function extractDeclaration(node: SyntaxNode): ParsedDecl | null {
   if (!nameNode) return null;
   const name = nameNode.text;
 
-  const objectKind = declarationObjectKind(node);
+  const objectAnn = declarationObjectAnnotation(node, imports);
+  const objectKind = objectAnn?.kind ?? null;
   const hasConfiqureAnnotation = objectKind !== null;
   const superTypes = extractSuperTypes(node);
   const superclassName = extractSuperclassName(node);
@@ -474,7 +494,7 @@ function extractDeclaration(node: SyntaxNode): ParsedDecl | null {
         continue;
       }
       if (child.type === "field_declaration") {
-        const extracted = extractFields(child, pendingDoc);
+        const extracted = extractFields(child, pendingDoc, imports);
         fields.push(...extracted);
       }
       pendingDoc = null;
@@ -486,7 +506,9 @@ function extractDeclaration(node: SyntaxNode): ParsedDecl | null {
   }
 
   const identityField = fields.find((f) => f.identity)?.name ?? null;
-  return { kind, name, hasConfiqureAnnotation, objectKind, identityField, fields, superTypes, superclassName, enumConstants };
+  const objectEnd = objectAnn && objectKind !== "FACTS" ? annotationStringArg(objectAnn.node, "end") : null;
+  const objectCallback = objectKind === "FACTS" ? annotationStringArg(objectAnn!.node, "callback") : null;
+  return { kind, name, hasConfiqureAnnotation, objectKind, objectEnd, objectCallback, identityField, fields, superTypes, superclassName, enumConstants };
 }
 
 /**
@@ -531,13 +553,14 @@ function extractSuperTypes(node: SyntaxNode): string[] {
  * `Confiqure.` qualifier is required so `java.util.List`-style names can never root a class. The
  * pre-3.0 `@Confiqure(...)` form roots nothing; `lintSources` rejects it with a message instead.
  */
-function declarationObjectKind(node: SyntaxNode): ObjectKind | null {
+function declarationObjectAnnotation(node: SyntaxNode, imports: string[]): { kind: ObjectKind; node: SyntaxNode } | null {
   for (const ann of annotationsOf(node)) {
-    const m = (ann.childForFieldName("name")?.text ?? "").match(/(?:^|\.)Confiqure\.(User\.)?(Setting|List|Facts)$/);
-    if (!m) continue;
-    if (m[2] === "Facts") return "FACTS";
-    if (m[2] === "Setting") return m[1] ? "USER_SETTING" : "SETTING";
-    return m[1] ? "USER_LIST" : "LIST";
+    const n = confiqureName(ann.childForFieldName("name")?.text ?? "", imports);
+    if (n === "Facts") return { kind: "FACTS", node: ann };
+    if (n === "Setting") return { kind: "SETTING", node: ann };
+    if (n === "List") return { kind: "LIST", node: ann };
+    if (n === "User.Setting") return { kind: "USER_SETTING", node: ann };
+    if (n === "User.List") return { kind: "USER_LIST", node: ann };
   }
   return null;
 }
@@ -559,14 +582,14 @@ function lastSegment(name: string): string {
   return dot === -1 ? name : name.slice(dot + 1);
 }
 
-function extractFields(fieldDecl: SyntaxNode, doc: string | null): ParsedField[] {
+function extractFields(fieldDecl: SyntaxNode, doc: string | null, imports: string[]): ParsedField[] {
   const typeNode = fieldDecl.childForFieldName("type");
   if (!typeNode) return [];
   const typeText = typeNode.text;
   const typeNames = collectTypeIdentifiers(typeNode);
 
-  const identity = annotationsOf(fieldDecl).some((a) =>
-    /(?:^|\.)Confiqure\.Identity$/.test(a.childForFieldName("name")?.text ?? "")
+  const identity = annotationsOf(fieldDecl).some(
+    (a) => confiqureName(a.childForFieldName("name")?.text ?? "", imports) === "Identity"
   );
   const out: ParsedField[] = [];
   for (const child of fieldDecl.namedChildren) {

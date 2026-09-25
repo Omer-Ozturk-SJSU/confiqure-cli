@@ -79,7 +79,7 @@ describe("lintBundle (#83 — simple-name enum collisions + bad enum defaults)",
 describe("lintBundle (#140 — @Confiqure root extends a base absent from the push)", () => {
   it("warns when the base class source isn't in the bundle", async () => {
     const warnings = await lint({
-      "AsinDiscovery.java": `@ai.confiqure.annotation.Confiqure.List(end = "/d")
+      "AsinDiscovery.java": `@ai.confiqure.Confiqure.List(end = "/d")
         public class AsinDiscovery extends Discovery { private String extra; }`,
       // Discovery.java is intentionally NOT in the bundle (out of scanPaths).
     });
@@ -89,7 +89,7 @@ describe("lintBundle (#140 — @Confiqure root extends a base absent from the pu
 
   it("is silent when the base IS in the bundle", async () => {
     const warnings = await lint({
-      "AsinDiscovery.java": `@ai.confiqure.annotation.Confiqure.List(end = "/d")
+      "AsinDiscovery.java": `@ai.confiqure.Confiqure.List(end = "/d")
         public class AsinDiscovery extends Discovery { private String extra; }`,
       "Discovery.java": `public class Discovery { private Integer minSalesRank; }`,
     });
@@ -105,7 +105,7 @@ describe("lintBundle (#140 — @Confiqure root extends a base absent from the pu
 
   it("does not warn on `implements` (only `extends` carries invisible instance fields)", async () => {
     const warnings = await lint({
-      "Root.java": `@ai.confiqure.annotation.Confiqure.List(end = "/d")
+      "Root.java": `@ai.confiqure.Confiqure.List(end = "/d")
         public class Root implements java.io.Serializable { private String x; }`,
     });
     expect(warnings.some((w) => w.includes("isn't in this push"))).toBe(false);
@@ -126,11 +126,25 @@ describe("lintSources (3.0 — pre-3.0 annotation forms are rejected before uplo
   });
   it("accepts the 3.0 forms, a class-level @Confiqure.Tool, and mentions inside comments", () => {
     const errors = lintSources([
-      { filePath: "a/L.java", source: `import ai.confiqure.annotation.Confiqure;\n@Confiqure.List(end = "/l")\nclass L { @Confiqure.Identity private String sku; }` },
+      { filePath: "a/L.java", source: `import ai.confiqure.Confiqure;\n@Confiqure.List(end = "/l")\nclass L { @Confiqure.Identity private String sku; }` },
       { filePath: "a/U.java", source: `@Confiqure.User.Setting\nclass U {}` },
       { filePath: "a/F.java", source: `@Confiqure.Facts(callback = "/f")\nclass F {}` },
       { filePath: "a/T.java", source: `/** FLOW. Old style was @Confiqure(end = "/x"). */\n@Confiqure.Tool(name = "T")\n@RestController\n@RequestMapping("/api")\npublic class T {\n  @PostMapping("/a") public String a(@RequestBody Q q) { return null; }\n}` },
     ]);
     expect(errors).toEqual([]);
+  });
+});
+
+describe("lintSources — a class-level @Confiqure.Tool followed by annotations with braces/semicolons (review finding 1)", () => {
+  const cls = (anns: string) => `@Confiqure.Tool(name = "T")\n@RestController\n${anns}\npublic class T {\n  @PostMapping("/a") public String a(@RequestBody Q q) { return null; }\n}`;
+  it("accepts path = {…}, an array value, and a string holding a semicolon", () => {
+    expect(lintSources([{ filePath: "a.java", source: cls(`@RequestMapping(path = {"/api/t"})`) }])).toEqual([]);
+    expect(lintSources([{ filePath: "b.java", source: cls(`@RequestMapping({"/a", "/b"})`) }])).toEqual([]);
+    expect(lintSources([{ filePath: "c.java", source: cls(`@Tag(name = "x", description = "a; b")`) }])).toEqual([]);
+    expect(lintSources([{ filePath: "d.java", source: `@Confiqure.Tool(name = "a) {; b")\npublic final class D {}` }])).toEqual([]);
+  });
+  it("still rejects @Confiqure.Tool on a method, even behind other annotations", () => {
+    const src = `class T {\n  @Confiqure.Tool(name = "x")\n  @PostMapping({"/a"})\n  public List<String> x(@RequestBody Q q) { return null; }\n}`;
+    expect(lintSources([{ filePath: "m.java", source: src }])).toHaveLength(1);
   });
 });
