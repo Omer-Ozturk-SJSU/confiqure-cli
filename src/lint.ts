@@ -1,4 +1,35 @@
-import type { EnumDecl, ParsedFile, ParsedToolClass } from "./classTree.js";
+import type { EnumDecl, LiteralIssue, ParsedFile, ParsedToolClass } from "./classTree.js";
+
+/**
+ * Row 9217: an annotation member confiqure reads as text must be a string literal, or literals joined
+ * with +. A constant reaches the engine as nothing — a blank confirm card, a consent dropped, a gate
+ * switched off — and reaches the CLI as the constant's own name. A push error names the file, line,
+ * owner and member, so the developer sees it at push instead of a seller seeing the result.
+ */
+export function lintAnnotationLiterals(parsed: ParsedFile[]): string[] {
+  const out: string[] = [];
+  for (const pf of parsed) {
+    for (const i of pf.literalIssues) {
+      const head = `${pf.filePath}:${i.line}: ${i.where} — the ${i.member} of ${i.annotation} is`;
+      const effect = consequence(i);
+      out.push(
+        i.textBlock
+          ? `${head} a text block ("""). confiqure reads text blocks as nothing for now, so ${effect}. Write it as a string literal, or literals joined with +.`
+          : `${head} ${i.valueText}, not a string literal. confiqure reads only a string literal (or literals joined with +), so ${effect}. Write it inline.`
+      );
+    }
+  }
+  return out;
+}
+
+function consequence(i: LiteralIssue): string {
+  if (i.member === "path") return i.where.startsWith("class ") ? "the operation URLs would be wrong" : "the operation URL would be wrong";
+  if (i.annotation === "@Confiqure.Consent") return i.member === "text" ? "the confirm card would show no terms" : "the consent would be dropped";
+  if (i.member === "requires" || i.member === "tool") return "the gate would be switched off";
+  if (i.member === "message") return "a refusal would carry no reason";
+  const what = i.member === "name" ? "the tool class's name" : i.member === "end" ? "the address" : "the callback";
+  return `the push would use the constant's own name as ${what}`;
+}
 
 /**
  * Tool-class operation errors: a public operation confiqure can't reach (no Spring mapping and not a

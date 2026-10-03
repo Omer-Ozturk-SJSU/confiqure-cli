@@ -142,6 +142,26 @@ export interface ParsedToolClass {
   sourceFile: string;
 }
 
+/**
+ * An annotation member confiqure reads (row 9217) whose value is not a string literal or literals
+ * joined with + — a constant, a call, a text block. The engine reads such a value as nothing, and the
+ * CLI would read a constant's own name; lintAnnotationLiterals turns each into a push error.
+ */
+export interface LiteralIssue {
+  /** 1-based line of the member's value. */
+  line: number;
+  /** `Class.field`, `Class.method()`, or `class Class`. */
+  where: string;
+  /** `@Confiqure.Consent`, `@PostMapping`, … */
+  annotation: string;
+  /** The member as the developer knows it: text, id, requires, message, tool, name, end, callback, path. */
+  member: string;
+  /** The value as written, whitespace collapsed. */
+  valueText: string;
+  /** True for a Java text block (three quotes). */
+  textBlock: boolean;
+}
+
 export interface ParsedFile {
   filePath: string;
   packageName: string | null;
@@ -153,6 +173,8 @@ export interface ParsedFile {
   toolClasses: ParsedToolClass[];
   /** Every enum in the file, including nested ones, with their enclosing-type chain (lint input). */
   enums: EnumDecl[];
+  /** Read-by-confiqure annotation members that are not string literals (row 9217). */
+  literalIssues: LiteralIssue[];
 }
 
 export interface ClassTree {
@@ -236,7 +258,8 @@ function extractFile(filePath: string, root: SyntaxNode): ParsedFile {
 
   const typeNames: string[] = [];
   collectTypeNames(root, typeNames);
-  return { filePath, packageName, imports, typeNames, declarations, toolClasses, enums };
+  const literalIssues = collectLiteralIssues(root, imports, new Set(toolClasses.map((tc) => tc.className)));
+  return { filePath, packageName, imports, typeNames, declarations, toolClasses, enums, literalIssues };
 }
 
 /**
@@ -271,6 +294,109 @@ function collectTypeNames(node: SyntaxNode, out: string[]): void {
     const body = child.childForFieldName("body");
     if (body) collectTypeNames(body, out);
   }
+}
+
+/**
+ * The annotation members confiqure reads as text, by annotation (row 9217). The engine reads the
+ * Consent and gate members; the CLI reads Tool name, an object's end and a Facts callback itself.
+ */
+const LITERAL_MEMBERS: Record<string, string[]> = {
+  Consent: ["text", "id"],
+  Gate: ["requires", "message"],
+  SectionGate: ["requires", "message"],
+  ToolGate: ["tool", "requires", "message"],
+  Tool: ["name"],
+  Setting: ["end"],
+  List: ["end"],
+  "User.Setting": ["end"],
+  "User.List": ["end"],
+  Facts: ["callback"],
+};
+const SPRING_MAPPINGS = new Set(["RequestMapping", "PostMapping", "GetMapping", "PutMapping", "DeleteMapping", "PatchMapping"]);
+
+function collectLiteralIssues(root: SyntaxNode, imports: string[], toolClassNames: Set<string>): LiteralIssue[] {
+  const out: LiteralIssue[] = [];
+  for (const ann of root.descendantsOfType("annotation")) {
+    if (!ann) continue;
+    const name = ann.childForFieldName("name")?.text ?? "";
+    const cn = confiqureName(name, imports);
+    let label: string;
+    let members: string[];
+    let spring = false;
+    if (cn && LITERAL_MEMBERS[cn]) {
+      label = `@Confiqure.${cn}`;
+      members = LITERAL_MEMBERS[cn];
+    } else if (SPRING_MAPPINGS.has(lastSegment(name)) && toolClassNames.has(enclosingClassName(ann) ?? "")) {
+      // A Spring path matters to confiqure only on a tool class and its operations.
+      label = `@${lastSegment(name)}`;
+      members = ["path"];
+      spring = true;
+    } else {
+      continue;
+    }
+    for (const arg of ann.childForFieldName("arguments")?.namedChildren ?? []) {
+      if (!arg || arg.type.endsWith("comment")) continue;
+      const pair = arg.type === "element_value_pair";
+      const value = pair ? arg.childForFieldName("value") : arg;
+      let key = pair ? arg.childForFieldName("key")?.text ?? "" : "value";
+      if (spring && (key === "value" || key === "path")) key = "path";
+      if (cn === "Tool" && key === "value") key = "name";
+      if (!value || !members.includes(key) || isTextLiteral(value, spring)) continue;
+      out.push({
+        line: value.startPosition.row + 1,
+        where: describeOwner(ann),
+        annotation: label,
+        member: key,
+        valueText: value.text.replace(/\s+/g, " ").slice(0, 80),
+        textBlock: value.type === "string_literal" && value.text.startsWith('"""'),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * What the engine (JavaParser) and the CLI can read as text: a plain string literal, or a + join of
+ * them. Not a text block (JavaParser reads it as a different node), not parentheses, not a constant.
+ * A Spring path may also be an array of such strings.
+ */
+function isTextLiteral(n: SyntaxNode, allowArray: boolean): boolean {
+  if (n.type === "string_literal") return !n.text.startsWith('"""');
+  if (n.type === "binary_expression") {
+    const op = n.childForFieldName("operator")?.text ?? n.children.find((c) => c && !c.isNamed)?.text;
+    const left = n.childForFieldName("left");
+    const right = n.childForFieldName("right");
+    return op === "+" && !!left && !!right && isTextLiteral(left, false) && isTextLiteral(right, false);
+  }
+  if (allowArray && n.type === "element_value_array_initializer") {
+    return n.namedChildren.every((c) => !!c && (c.type.endsWith("comment") || isTextLiteral(c, false)));
+  }
+  return false;
+}
+
+const DECLARATIONS = new Set(["class_declaration", "interface_declaration", "record_declaration", "enum_declaration"]);
+
+function enclosingClassName(node: SyntaxNode): string | null {
+  for (let p = node.parent; p; p = p.parent) {
+    if (DECLARATIONS.has(p.type)) return p.childForFieldName("name")?.text ?? null;
+  }
+  return null;
+}
+
+/** `Class.field`, `Class.method()`, `Class.component` or `class Class` — what an annotation sits on. */
+function describeOwner(ann: SyntaxNode): string {
+  for (let p = ann.parent; p; p = p.parent) {
+    if (p.type === "field_declaration") {
+      const names = p.namedChildren
+        .filter((c): c is SyntaxNode => !!c && c.type === "variable_declarator")
+        .map((c) => c.childForFieldName("name")?.text ?? "");
+      return `${enclosingClassName(p) ?? "?"}.${names.join(", ")}`;
+    }
+    if (p.type === "method_declaration") return `${enclosingClassName(p) ?? "?"}.${p.childForFieldName("name")?.text ?? ""}()`;
+    if (p.type === "formal_parameter") return `${enclosingClassName(p) ?? "?"}.${p.childForFieldName("name")?.text ?? ""}`;
+    if (DECLARATIONS.has(p.type)) return `class ${p.childForFieldName("name")?.text ?? "?"}`;
+  }
+  return "?";
 }
 
 /** Closed value set of an enum body (the `enum_constant` names), ignoring any method members. */
