@@ -32,10 +32,15 @@ Since CLI 1.0 the scan reads the **annotation 3.0** vocabulary (`ai.confiqure:co
 | `@Confiqure.Facts(callback)` | class | the user-facts contract |
 | `@Confiqure.Tool(name)` | class | a tool class: its Javadoc is the flow, every public method one operation |
 | `@Confiqure.Browser` / `@Confiqure.Async` | a tool-class method | runs in the page / result delivered later |
+| `@Confiqure.ValidatedBy(X.class)` / `@Confiqure.VerifiedBy(Y.class)` (annotation 3.1) | a field; `VerifiedBy` also a request class | carried in the class source; the engine calls `X.validate` / `Y.verify` |
 
 Operations are POST only. An operation's URL comes from Spring: the class `@RequestMapping` joined with the method's `@PostMapping`. A public method mapped any other way (`@GetMapping`, `@PutMapping`, `@DeleteMapping`, `@PatchMapping`, a method-level `@RequestMapping`), or with neither `@PostMapping` nor `@Confiqure.Browser`, stops the push. The annotations may be written bare (`@List`, `@Identity`, `@User.Setting`) when imported from `ai.confiqure.Confiqure`. So do the pre-3.0 forms — `@Confiqure(end = …)` on a class and `@Confiqure.Tool` on a method — each with a message naming the file and the replacement. An object without `end` gets `/<snake_case class name>`; two objects on one address get a warning.
 
 `confiqure push` parses each class with tree-sitter, walks the field-type graph, and ships every file transitively reachable from it — for an object its field types, for a tool class the input and return DTOs of its operations. Nested classes (e.g. `EmailPreferences` referenced from `NotificationPreferences`) come along automatically without an annotation of their own. Objects and tool classes are both diffed by path and content, so only what changed is uploaded.
+
+Since CLI 1.1 (annotation 3.1.0), `@Confiqure.ValidatedBy` / `@Confiqure.VerifiedBy` name a host check: a `@Confiqure.Tool` class implementing `ConfiqureValidator` / `ConfiqureVerifier`, whose `validate` / `verify` the engine calls before a value is set. The push stops, naming the file and line, when that call could not be made: the value is not a class literal, the class is not a tool class in the push, two tool classes share its name, its `@Confiqure.Tool(name)` differs from its class name, or the method is missing, `@Confiqure.Browser` or `@Confiqure.Async`.
+
+Upgrading from CLI 0.5: move the classes to the 3.0 vocabulary first (`Setting` / `List` / `User.*` on classes, `@Confiqure.Tool` on classes, not methods); tool classes then ship with every push.
 
 Tools are registered by `confiqure push`; `confiqure tools set` is retired (`tools list` / `tools delete` remain).
 

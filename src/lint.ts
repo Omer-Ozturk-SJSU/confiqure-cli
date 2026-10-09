@@ -53,6 +53,53 @@ export function lintToolClasses(classes: ParsedToolClass[]): string[] {
 }
 
 /**
+ * Annotation 3.1 host checks: `@Confiqure.ValidatedBy(X.class)` / `@Confiqure.VerifiedBy(Y.class)` name a tool class
+ * whose `validate` / `verify` the engine calls by the route `X.validate` / `Y.verify`, resolved against the pushed
+ * tool classes by their tool name. Each is a push error when that route could not resolve: the value is not a class
+ * literal (the pre-release string form), the class is not a tool class in this push, two tool classes share the
+ * name, its tool name differs from its class name, or the method is missing or cannot answer at once.
+ */
+export function lintCheckRefs(parsed: ParsedFile[]): string[] {
+  const out: string[] = [];
+  const byName = new Map<string, ParsedToolClass[]>();
+  for (const tc of parsed.flatMap((pf) => pf.toolClasses)) {
+    byName.set(tc.className, [...(byName.get(tc.className) ?? []), tc]);
+  }
+  for (const pf of parsed) {
+    for (const r of pf.checkRefs) {
+      const method = r.annotation === "ValidatedBy" ? "validate" : "verify";
+      const iface = r.annotation === "ValidatedBy" ? "ConfiqureValidator" : "ConfiqureVerifier";
+      const head = `${pf.filePath}:${r.line}: ${r.where} — @Confiqure.${r.annotation}`;
+      if (!r.checkClass) {
+        out.push(`${head}(${r.valueText}) must name its check class, e.g. @Confiqure.${r.annotation}(CatalogCheck.class): a @Confiqure.Tool class implementing ${iface}.`);
+        continue;
+      }
+      const tcs = byName.get(r.checkClass) ?? [];
+      if (tcs.length === 0) {
+        out.push(`${head} names ${r.checkClass}, which is not a @Confiqure.Tool class in this push, so the engine could not call ${r.checkClass}.${method}. Annotate it with @Confiqure.Tool and implement ${iface}.`);
+        continue;
+      }
+      if (tcs.length > 1) {
+        out.push(`${head} names ${r.checkClass}, and ${tcs.length} tool classes have that name (${tcs.map((t) => t.sourceFile).join(", ")}); the engine finds a check by its simple name. Rename one.`);
+        continue;
+      }
+      const tc = tcs[0];
+      if (tc.name !== tc.className) {
+        out.push(`${head} names ${r.checkClass}, whose @Confiqure.Tool name is "${tc.name}"; the engine calls a check as ${tc.className}.${method}, so a check class keeps its class name as its tool name. Remove the name.`);
+        continue;
+      }
+      const op = tc.operations.find((o) => o.name === method);
+      if (!op) {
+        out.push(`${head} names ${r.checkClass}, which has no public ${method} operation: implement ${iface} and map ${method} with @PostMapping.`);
+      } else if (op.browser || op.async) {
+        out.push(`${head} names ${r.checkClass}, whose ${method} is @Confiqure.${op.browser ? "Browser" : "Async"}; a check must answer at once from your server. Remove the annotation.`);
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Annotation 3.0 gate: the pre-3.0 forms are ERRORS, not warnings — `push` prints them and stops
  * before uploading. The class-level `@Confiqure(...)` / bare `@Confiqure` marker and a method-level
  * `@Confiqure.Tool` no longer compile against annotation 3.0.0, and the backend refuses an object

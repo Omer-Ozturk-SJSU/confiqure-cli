@@ -162,6 +162,23 @@ export interface LiteralIssue {
   textBlock: boolean;
 }
 
+/**
+ * A `@Confiqure.ValidatedBy` / `@Confiqure.VerifiedBy` (annotation 3.1): the host check class it names. The engine
+ * calls `<checkClass>.validate` / `.verify` through that tool class's operation row, so lintCheckRefs makes sure the
+ * route resolves before the push.
+ */
+export interface CheckRef {
+  /** 1-based line of the annotation. */
+  line: number;
+  /** `Class.field` or `class Class` — what the annotation sits on. */
+  where: string;
+  annotation: "ValidatedBy" | "VerifiedBy";
+  /** The class literal's simple name (`CatalogCheck.class` → `CatalogCheck`); null when the value is not a class literal. */
+  checkClass: string | null;
+  /** The value as written, whitespace collapsed. */
+  valueText: string;
+}
+
 export interface ParsedFile {
   filePath: string;
   packageName: string | null;
@@ -175,6 +192,8 @@ export interface ParsedFile {
   enums: EnumDecl[];
   /** Read-by-confiqure annotation members that are not string literals (row 9217). */
   literalIssues: LiteralIssue[];
+  /** Every ValidatedBy / VerifiedBy in the file, nested types included (lint input). */
+  checkRefs: CheckRef[];
 }
 
 export interface ClassTree {
@@ -259,7 +278,8 @@ function extractFile(filePath: string, root: SyntaxNode): ParsedFile {
   const typeNames: string[] = [];
   collectTypeNames(root, typeNames);
   const literalIssues = collectLiteralIssues(root, imports, new Set(toolClasses.map((tc) => tc.className)));
-  return { filePath, packageName, imports, typeNames, declarations, toolClasses, enums, literalIssues };
+  const checkRefs = collectCheckRefs(root, imports);
+  return { filePath, packageName, imports, typeNames, declarations, toolClasses, enums, literalIssues, checkRefs };
 }
 
 /**
@@ -353,6 +373,31 @@ function collectLiteralIssues(root: SyntaxNode, imports: string[], toolClassName
     }
   }
   return out;
+}
+
+/** Every ValidatedBy / VerifiedBy annotation in the file, with the class its value names. */
+function collectCheckRefs(root: SyntaxNode, imports: string[]): CheckRef[] {
+  const out: CheckRef[] = [];
+  for (const ann of [...root.descendantsOfType("annotation"), ...root.descendantsOfType("marker_annotation")]) {
+    if (!ann) continue;
+    const cn = confiqureName(ann.childForFieldName("name")?.text ?? "", imports);
+    if (cn !== "ValidatedBy" && cn !== "VerifiedBy") continue;
+    let value: SyntaxNode | null = null;
+    for (const arg of ann.childForFieldName("arguments")?.namedChildren ?? []) {
+      if (!arg || arg.type.endsWith("comment")) continue;
+      if (arg.type !== "element_value_pair") value = arg;
+      else if (arg.childForFieldName("key")?.text === "value") value = arg.childForFieldName("value");
+    }
+    const literal = value?.type === "class_literal" ? value.text.replace(/\s+/g, "").replace(/\.class$/, "") : null;
+    out.push({
+      line: ann.startPosition.row + 1,
+      where: describeOwner(ann),
+      annotation: cn,
+      checkClass: literal ? lastSegment(literal.replace(/<.*$/, "")) : null,
+      valueText: (value?.text ?? "").replace(/\s+/g, " ").slice(0, 80),
+    });
+  }
+  return out.sort((a, b) => a.line - b.line);
 }
 
 /**
