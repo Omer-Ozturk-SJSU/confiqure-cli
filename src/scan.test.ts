@@ -94,3 +94,25 @@ describe("scanProject 1.0.1 — same-named objects in different packages keep th
     }
   });
 });
+
+describe("scanProject 1.1.0 — a host check the engine could not call blocks the push", () => {
+  it("a VerifiedBy naming a class outside the pushed tool classes is a scan error; adding the tool class clears it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cq-check-"));
+    await mkdir(join(dir, "src"));
+    await writeFile(join(dir, "src/A.java"),
+      `@Confiqure.Setting(end = "/a")\npublic class A {\n  @Confiqure.VerifiedBy(CatalogCheck.class) private String productCode;\n}`);
+    const missing = await scanProject(dir, { ...DEFAULT_CONFIG, scanPaths: ["src"] });
+    await writeFile(join(dir, "src/CatalogCheck.java"),
+      `@Confiqure.Tool\npublic class CatalogCheck implements ConfiqureVerifier<String> {\n` +
+        `  @PostMapping("/checks/catalog") public Confiqure.Verdict<String> verify(@RequestBody Confiqure.Check<String> c) { return null; }\n}`);
+    const present = await scanProject(dir, { ...DEFAULT_CONFIG, scanPaths: ["src"] });
+    await rm(dir, { recursive: true, force: true });
+    expect(missing.errors).toHaveLength(1);
+    expect(missing.errors[0]).toContain("src/A.java:3: A.productCode — @Confiqure.VerifiedBy names CatalogCheck, which is not a @Confiqure.Tool class");
+    expect(present.errors).toEqual([]);
+    // the check ships as an ordinary operation row of its tool class, named by its class name
+    const tc = present.toolClasses.find((t) => t.className === "CatalogCheck")!;
+    expect(tc.name).toBe("CatalogCheck");
+    expect(tc.operations.map((o) => [o.name, o.httpMethod, o.path])).toEqual([["verify", "POST", "/checks/catalog"]]);
+  });
+});

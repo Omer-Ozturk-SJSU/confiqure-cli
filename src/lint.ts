@@ -1,4 +1,35 @@
-import type { EnumDecl, ParsedFile, ParsedToolClass } from "./classTree.js";
+import type { EnumDecl, LiteralIssue, ParsedFile, ParsedToolClass } from "./classTree.js";
+
+/**
+ * Row 9217: an annotation member confiqure reads as text must be a string literal, or literals joined
+ * with +. A constant reaches the engine as nothing — a blank confirm card, a consent dropped, a gate
+ * switched off — and reaches the CLI as the constant's own name. A push error names the file, line,
+ * owner and member, so the developer sees it at push instead of a seller seeing the result.
+ */
+export function lintAnnotationLiterals(parsed: ParsedFile[]): string[] {
+  const out: string[] = [];
+  for (const pf of parsed) {
+    for (const i of pf.literalIssues) {
+      const head = `${pf.filePath}:${i.line}: ${i.where} — the ${i.member} of ${i.annotation} is`;
+      const effect = consequence(i);
+      out.push(
+        i.textBlock
+          ? `${head} a text block ("""). confiqure reads text blocks as nothing for now, so ${effect}. Write it as a string literal, or literals joined with +.`
+          : `${head} ${i.valueText}, not a string literal. confiqure reads only a string literal (or literals joined with +), so ${effect}. Write it inline.`
+      );
+    }
+  }
+  return out;
+}
+
+function consequence(i: LiteralIssue): string {
+  if (i.member === "path") return i.where.startsWith("class ") ? "the operation URLs would be wrong" : "the operation URL would be wrong";
+  if (i.annotation === "@Confiqure.Consent") return i.member === "text" ? "the confirm card would show no terms" : "the consent would be dropped";
+  if (i.member === "requires" || i.member === "tool") return "the gate would be switched off";
+  if (i.member === "message") return "a refusal would carry no reason";
+  const what = i.member === "name" ? "the tool class's name" : i.member === "end" ? "the address" : "the callback";
+  return `the push would use the constant's own name as ${what}`;
+}
 
 /**
  * Tool-class operation errors: a public operation confiqure can't reach (no Spring mapping and not a
@@ -15,6 +46,53 @@ export function lintToolClasses(classes: ParsedToolClass[]): string[] {
         const declared =
           op.mapping === "RequestMapping" && op.httpMethod !== "POST" ? `@RequestMapping(method = ${op.httpMethod})` : `@${op.mapping}`;
         out.push(`${tc.sourceFile}: 3.0 operations use @PostMapping; ${tc.name}.${op.name} declares ${declared}.`);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Annotation 3.1 host checks: `@Confiqure.ValidatedBy(X.class)` / `@Confiqure.VerifiedBy(Y.class)` name a tool class
+ * whose `validate` / `verify` the engine calls by the route `X.validate` / `Y.verify`, resolved against the pushed
+ * tool classes by their tool name. Each is a push error when that route could not resolve: the value is not a class
+ * literal (the pre-release string form), the class is not a tool class in this push, two tool classes share the
+ * name, its tool name differs from its class name, or the method is missing or cannot answer at once.
+ */
+export function lintCheckRefs(parsed: ParsedFile[]): string[] {
+  const out: string[] = [];
+  const byName = new Map<string, ParsedToolClass[]>();
+  for (const tc of parsed.flatMap((pf) => pf.toolClasses)) {
+    byName.set(tc.className, [...(byName.get(tc.className) ?? []), tc]);
+  }
+  for (const pf of parsed) {
+    for (const r of pf.checkRefs) {
+      const method = r.annotation === "ValidatedBy" ? "validate" : "verify";
+      const iface = r.annotation === "ValidatedBy" ? "ConfiqureValidator" : "ConfiqureVerifier";
+      const head = `${pf.filePath}:${r.line}: ${r.where} — @Confiqure.${r.annotation}`;
+      if (!r.checkClass) {
+        out.push(`${head}(${r.valueText}) must name its check class, e.g. @Confiqure.${r.annotation}(CatalogCheck.class): a @Confiqure.Tool class implementing ${iface}.`);
+        continue;
+      }
+      const tcs = byName.get(r.checkClass) ?? [];
+      if (tcs.length === 0) {
+        out.push(`${head} names ${r.checkClass}, which is not a @Confiqure.Tool class in this push, so the engine could not call ${r.checkClass}.${method}. Annotate it with @Confiqure.Tool and implement ${iface}.`);
+        continue;
+      }
+      if (tcs.length > 1) {
+        out.push(`${head} names ${r.checkClass}, and ${tcs.length} tool classes have that name (${tcs.map((t) => t.sourceFile).join(", ")}); the engine finds a check by its simple name. Rename one.`);
+        continue;
+      }
+      const tc = tcs[0];
+      if (tc.name !== tc.className) {
+        out.push(`${head} names ${r.checkClass}, whose @Confiqure.Tool name is "${tc.name}"; the engine calls a check as ${tc.className}.${method}, so a check class keeps its class name as its tool name. Remove the name.`);
+        continue;
+      }
+      const op = tc.operations.find((o) => o.name === method);
+      if (!op) {
+        out.push(`${head} names ${r.checkClass}, which has no public ${method} operation: implement ${iface} and map ${method} with @PostMapping.`);
+      } else if (op.browser || op.async) {
+        out.push(`${head} names ${r.checkClass}, whose ${method} is @Confiqure.${op.browser ? "Browser" : "Async"}; a check must answer at once from your server. Remove the annotation.`);
       }
     }
   }

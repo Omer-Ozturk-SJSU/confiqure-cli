@@ -14,7 +14,7 @@ import {
   ParsedDecl,
   ParsedToolClass,
 } from "./classTree.js";
-import { lintBundle, lintSources, lintToolClasses } from "./lint.js";
+import { lintAnnotationLiterals, lintBundle, lintCheckRefs, lintSources, lintToolClasses } from "./lint.js";
 
 export type { ObjectKind } from "./classTree.js";
 
@@ -223,6 +223,8 @@ export async function scanProject(cwd: string, config: ProjectConfig): Promise<S
       });
     }
     errors.push(...lintToolClasses(toolClasses));
+    errors.push(...lintAnnotationLiterals(parsed));
+    errors.push(...lintCheckRefs(parsed));
 
     // Push-time lint (#83): warn on simple-name enum collisions / bad enum defaults the host can't
     // see but a name-based resolver trips over. Advisory only — never blocks the push.
