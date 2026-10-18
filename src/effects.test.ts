@@ -90,6 +90,72 @@ describe("lintOperationEffects — an effect the push cannot read stops it", () 
   });
 });
 
+describe("operation effect — one declaration, one argument, confiqure's own types (CPMA 13644, Jarvis #115153)", () => {
+  const OP = "public Ack openProductPage(@RequestBody Ref r) { return null; }";
+  const src = (imports: string, annotations: string) =>
+    `${imports}\n@ai.confiqure.Confiqure.Tool\npublic class PagesTool {\n${annotations}\n  ${OP}\n}`;
+  const effect = async (code: string) => (await parse(code))[0].toolClasses[0].operations[0];
+
+  const badShapes: [string, string][] = [
+    ["an unknown key", "@Confiqure.Effect(kind = Confiqure.OperationEffect.PAGE_OPENING)"],
+    ["value plus an unknown key", "@Confiqure.Effect(value = Confiqure.OperationEffect.PAGE_OPENING, reason = \"x\")"],
+    ["value twice", "@Confiqure.Effect(value = Confiqure.OperationEffect.NONE, value = Confiqure.OperationEffect.PAGE_OPENING)"],
+    ["positional plus value", "@Confiqure.Effect(Confiqure.OperationEffect.PAGE_OPENING, value = Confiqure.OperationEffect.NONE)"],
+    ["an array", "@Confiqure.Effect({Confiqure.OperationEffect.PAGE_OPENING})"],
+  ];
+  for (const [label, annotation] of badShapes) {
+    it(`${label} is unreadable, never the last value written`, async () => {
+      const parsed = await parse(src("import ai.confiqure.Confiqure;", `  ${annotation}`));
+      expect(parsed[0].toolClasses[0].operations[0].effect).toBeNull();
+      expect(lintOperationEffects(parsed)).toHaveLength(1);
+      expect(lintOperationEffects(parsed)[0]).toContain("is not a value confiqure can read");
+    });
+  }
+
+  it("two @Confiqure.Effect on one method is an error, never a precedence", async () => {
+    const parsed = await parse(src("import ai.confiqure.Confiqure;",
+      "  @Confiqure.Effect(Confiqure.OperationEffect.NONE)\n  @ai.confiqure.Confiqure.Effect(ai.confiqure.Confiqure.OperationEffect.PAGE_OPENING)"));
+    expect(parsed[0].toolClasses[0].operations[0].effect).toBeNull();
+    expect(lintOperationEffects(parsed)).toEqual([
+      "a/PagesTool.java:5: PagesTool.openProductPage() — @Confiqure.Effect appears 2 times. Declare it once, with one value.",
+    ]);
+  });
+
+  it("a lookalike Effect never yields PAGE_OPENING: another package's Confiqure, a shadowing import, no import at all", async () => {
+    const PAGE = "Confiqure.OperationEffect.PAGE_OPENING";
+    for (const code of [
+      src("import ai.confiqure.Confiqure;", `  @other.Confiqure.Effect(${PAGE})`),
+      src("import com.other.Confiqure;", `  @Confiqure.Effect(${PAGE})`),
+      src("", `  @Confiqure.Effect(${PAGE})`),
+      src("import ai.confiqure.Confiqure;\nimport ai.confiqure.Confiqure.*;\nimport com.other.Effect;", `  @Effect(${PAGE})`),
+    ]) {
+      const parsed = await parse(code);
+      expect(parsed[0].toolClasses[0].operations[0].effect, code).toBe("NONE");
+      expect(lintOperationEffects(parsed), code).toEqual([]);
+    }
+  });
+
+  it("an imported OperationEffect or constant shadowed by another type's import is unreadable", async () => {
+    for (const [imports, value] of [
+      ["import ai.confiqure.Confiqure;\nimport ai.confiqure.Confiqure.*;\nimport com.other.OperationEffect;", "OperationEffect.PAGE_OPENING"],
+      ["import ai.confiqure.Confiqure;\nimport static ai.confiqure.Confiqure.OperationEffect.*;\nimport static com.other.Pages.PAGE_OPENING;", "PAGE_OPENING"],
+      ["import com.other.Confiqure;\nimport ai.confiqure.Confiqure.Effect;", "Confiqure.OperationEffect.PAGE_OPENING"],
+    ]) {
+      expect((await effect(src(imports, `  @ai.confiqure.Confiqure.Effect(${value})`))).effect, imports).toBeNull();
+    }
+  });
+
+  it("the official forms still read: fully qualified, the imported annotation, the on-demand import", async () => {
+    for (const [imports, annotation] of [
+      ["", "@ai.confiqure.Confiqure.Effect(ai.confiqure.Confiqure.OperationEffect.PAGE_OPENING)"],
+      ["import ai.confiqure.Confiqure;\nimport ai.confiqure.Confiqure.Effect;", "@Effect(Confiqure.OperationEffect.PAGE_OPENING)"],
+      ["import ai.confiqure.*;", "@Confiqure.Effect(Confiqure.OperationEffect.PAGE_OPENING)"],
+    ]) {
+      expect((await effect(src(imports, `  ${annotation}`))).effect, imports).toBe("PAGE_OPENING");
+    }
+  });
+});
+
 describe("scan and manifest — the effect rides on every operation", () => {
   it("an unreadable effect is a scan error; a readable one is in the manifest beside NONE", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cq-effect-"));

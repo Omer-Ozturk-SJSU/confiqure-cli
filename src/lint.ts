@@ -110,6 +110,13 @@ export function lintOperationEffects(parsed: ParsedFile[]): string[] {
     for (const tc of pf.toolClasses) {
       for (const op of tc.operations) {
         if (op.effect !== null || !op.effectDeclared) continue;
+        if (op.effectDeclared.repeated) {
+          out.push(
+            `${pf.filePath}:${op.effectDeclared.line}: ${tc.className}.${op.name}() — @Confiqure.Effect appears ${op.effectDeclared.repeated} times. ` +
+              "Declare it once, with one value."
+          );
+          continue;
+        }
         const value = op.effectDeclared.text ? `(${op.effectDeclared.text})` : " with no value";
         out.push(
           `${pf.filePath}:${op.effectDeclared.line}: ${tc.className}.${op.name}() — @Confiqure.Effect${value} is not a value confiqure can read. ` +

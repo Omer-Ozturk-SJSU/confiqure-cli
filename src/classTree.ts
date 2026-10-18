@@ -107,7 +107,10 @@ export interface EnumDecl {
   enclosingTypes: string[];
 }
 
-/** `Confiqure.OperationEffect` (annotation 3.2): what running an operation does beyond its result. */
+/**
+ * `Confiqure.OperationEffect` (annotation 3.2): the effect an operation declares for the engine. NONE means no declared
+ * page-opening effect, not that the operation has no other effect (an ordinary write or a popup is NONE).
+ */
 export type OperationEffect = "NONE" | "PAGE_OPENING";
 const OPERATION_EFFECTS: readonly OperationEffect[] = ["NONE", "PAGE_OPENING"];
 
@@ -130,8 +133,11 @@ export interface ParsedOperation {
    * cannot read (lintOperationEffects makes that a push error, never a silent NONE).
    */
   effect: OperationEffect | null;
-  /** The declared `@Confiqure.Effect` value as written, and its 1-based line; null without the annotation. */
-  effectDeclared: { text: string; line: number } | null;
+  /**
+   * The declared `@Confiqure.Effect` value as written, and its 1-based line; `repeated` when the method carries it more
+   * than once; null without the annotation.
+   */
+  effectDeclared: { text: string; line: number; repeated?: number } | null;
   /** The `@RequestBody` param type, else the first param type. */
   inputType: string | null;
   /** Method return type as written (generics kept). */
@@ -397,35 +403,73 @@ function collectLiteralIssues(root: SyntaxNode, imports: string[], toolClassName
  * Anything else (a constant of another type, a local enum of the same name, no value) is null: unreadable.
  */
 function operationEffect(
-  ann: SyntaxNode | null,
+  anns: SyntaxNode[],
   imports: string[]
 ): Pick<ParsedOperation, "effect" | "effectDeclared"> {
-  if (!ann) return { effect: "NONE", effectDeclared: null };
-  let value: SyntaxNode | null = null;
-  for (const arg of ann.childForFieldName("arguments")?.namedChildren ?? []) {
-    if (!arg || arg.type.endsWith("comment")) continue;
-    if (arg.type !== "element_value_pair") value = arg;
-    else if (arg.childForFieldName("key")?.text === "value") value = arg.childForFieldName("value");
+  if (anns.length === 0) return { effect: "NONE", effectDeclared: null };
+  if (anns.length > 1) {
+    // Never a precedence between two declarations: unreadable.
+    return { effect: null, effectDeclared: { text: "", line: anns[1].startPosition.row + 1, repeated: anns.length } };
   }
-  const text = (value?.text ?? "").replace(/\s+/g, "");
-  const declared = { text: text.slice(0, 80), line: (value ?? ann).startPosition.row + 1 };
-  return { effect: resolveEffect(text, imports), effectDeclared: declared };
+  const ann = anns[0];
+  const argList = ann.childForFieldName("arguments");
+  const args = (argList?.namedChildren ?? []).filter((a): a is SyntaxNode => !!a && !a.type.endsWith("comment"));
+  // Exactly one argument, positional or `value = …`. None, several, an unknown key or a repeated `value` is
+  // unreadable: never the last one written, never NONE by default.
+  const only = args.length === 1 ? args[0] : null;
+  const value =
+    only === null
+      ? null
+      : only.type !== "element_value_pair"
+        ? only
+        : only.childForFieldName("key")?.text === "value"
+          ? only.childForFieldName("value")
+          : null;
+  const written = (value ?? argList)?.text.replace(/^\(|\)$/g, "") ?? "";
+  const declared = { text: written.replace(/\s+/g, " ").trim().slice(0, 80), line: (value ?? ann).startPosition.row + 1 };
+  return { effect: value ? resolveEffect(value.text.replace(/\s+/g, ""), imports) : null, effectDeclared: declared };
 }
 
 function resolveEffect(text: string, imports: string[]): OperationEffect | null {
   const constant = text.slice(text.lastIndexOf(".") + 1) as OperationEffect;
   if (!OPERATION_EFFECTS.includes(constant)) return null;
   const qualifier = text.includes(".") ? text.slice(0, text.lastIndexOf(".")) : "";
-  if (qualifier === "Confiqure.OperationEffect" || qualifier === "ai.confiqure.Confiqure.OperationEffect") return constant;
-  if (qualifier === "OperationEffect") {
-    return imports.some((i) => i === "ai.confiqure.Confiqure.OperationEffect" || i === "ai.confiqure.Confiqure.*") ? constant : null;
-  }
-  if (qualifier === "") {
-    return imports.some((i) => i === `ai.confiqure.Confiqure.OperationEffect.${constant}` || i === "ai.confiqure.Confiqure.OperationEffect.*")
-      ? constant
-      : null;
-  }
-  return null;
+  const official =
+    qualifier === "ai.confiqure.Confiqure.OperationEffect" ||
+    (qualifier === "Confiqure.OperationEffect" && importResolves("ai.confiqure.Confiqure", imports)) ||
+    (qualifier === "OperationEffect" && importResolves("ai.confiqure.Confiqure.OperationEffect", imports)) ||
+    (qualifier === "" && importResolves(`ai.confiqure.Confiqure.OperationEffect.${constant}`, imports));
+  return official ? constant : null;
+}
+
+const OFFICIAL_EFFECT = "ai.confiqure.Confiqure.Effect";
+
+/**
+ * True only for confiqure's own `@Effect`: written fully qualified, or as `Confiqure.Effect` / `Effect` where the file's
+ * imports resolve that name to confiqure's type. Used by the effect parser alone (the older annotation readers keep
+ * their looser name match): a lookalike `other.Confiqure.Effect` never yields PAGE_OPENING.
+ */
+function isOfficialEffect(ann: SyntaxNode, imports: string[]): boolean {
+  const name = (ann.childForFieldName("name")?.text ?? "").replace(/\s+/g, "");
+  if (name === OFFICIAL_EFFECT) return true;
+  if (name === "Confiqure.Effect") return importResolves("ai.confiqure.Confiqure", imports);
+  if (name === "Effect") return importResolves(OFFICIAL_EFFECT, imports);
+  return false;
+}
+
+/**
+ * Whether a simple name resolves to `qualified` through the file's imports, as Java decides it: a single-type
+ * (or single-static) import of it, or an on-demand import of its container, and no single-type import of a different
+ * type with that simple name (which would shadow the on-demand one or conflict with it). Same-package resolution is
+ * not read: a host's classes do not live in `ai.confiqure`.
+ */
+function importResolves(qualified: string, imports: string[]): boolean {
+  const dot = qualified.lastIndexOf(".");
+  const simple = qualified.slice(dot + 1);
+  const container = qualified.slice(0, dot);
+  if (imports.includes(qualified)) return !imports.some((i) => i !== qualified && i.endsWith(`.${simple}`));
+  if (imports.some((i) => i.endsWith(`.${simple}`))) return false;
+  return imports.includes(`${container}.*`);
 }
 
 /** `@Confiqure.Effect` anywhere but on a public method of one of this file's tool classes: confiqure would never read it. */
@@ -433,7 +477,7 @@ function collectStrayEffects(root: SyntaxNode, imports: string[], toolClasses: P
   const toolNames = new Set(toolClasses.map((tc) => tc.className));
   const out: { line: number; where: string }[] = [];
   for (const ann of [...root.descendantsOfType("annotation"), ...root.descendantsOfType("marker_annotation")]) {
-    if (!ann || confiqureName(ann.childForFieldName("name")?.text ?? "", imports) !== "Effect") continue;
+    if (!ann || !isOfficialEffect(ann, imports)) continue;
     const owner = ann.parent?.parent;
     const isOperation =
       owner?.type === "method_declaration" &&
@@ -576,7 +620,7 @@ function extractToolClass(typeNode: SyntaxNode, doc: string | null, filePath: st
         path,
         browser: findConfiqureAnnotation(m, "Browser", imports) !== null,
         async: findConfiqureAnnotation(m, "Async", imports) !== null,
-        ...operationEffect(findConfiqureAnnotation(m, "Effect", imports), imports),
+        ...operationEffect(annotationsOf(m).filter((a) => isOfficialEffect(a, imports)), imports),
         inputType: extractInputType(m),
         returnType: m.childForFieldName("type")?.text ?? null,
         doc: pendingDoc,
