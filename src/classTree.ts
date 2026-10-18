@@ -107,6 +107,10 @@ export interface EnumDecl {
   enclosingTypes: string[];
 }
 
+/** `Confiqure.OperationEffect` (annotation 3.2): what running an operation does beyond its result. */
+export type OperationEffect = "NONE" | "PAGE_OPENING";
+const OPERATION_EFFECTS: readonly OperationEffect[] = ["NONE", "PAGE_OPENING"];
+
 /** One public method of a tool class — one typed operation the chat can call (annotation 3.0). */
 export interface ParsedOperation {
   /** Method name. */
@@ -121,6 +125,13 @@ export interface ParsedOperation {
   browser: boolean;
   /** `@Confiqure.Async` — the result is delivered later. */
   async: boolean;
+  /**
+   * `@Confiqure.Effect` (annotation 3.2): NONE when the operation carries none; null when it declares one the scan
+   * cannot read (lintOperationEffects makes that a push error, never a silent NONE).
+   */
+  effect: OperationEffect | null;
+  /** The declared `@Confiqure.Effect` value as written, and its 1-based line; null without the annotation. */
+  effectDeclared: { text: string; line: number } | null;
   /** The `@RequestBody` param type, else the first param type. */
   inputType: string | null;
   /** Method return type as written (generics kept). */
@@ -194,6 +205,8 @@ export interface ParsedFile {
   literalIssues: LiteralIssue[];
   /** Every ValidatedBy / VerifiedBy in the file, nested types included (lint input). */
   checkRefs: CheckRef[];
+  /** `@Confiqure.Effect` on anything that is not an operation of a tool class in this file (lint input). */
+  strayEffects: { line: number; where: string }[];
 }
 
 export interface ClassTree {
@@ -279,7 +292,8 @@ function extractFile(filePath: string, root: SyntaxNode): ParsedFile {
   collectTypeNames(root, typeNames);
   const literalIssues = collectLiteralIssues(root, imports, new Set(toolClasses.map((tc) => tc.className)));
   const checkRefs = collectCheckRefs(root, imports);
-  return { filePath, packageName, imports, typeNames, declarations, toolClasses, enums, literalIssues, checkRefs };
+  const strayEffects = collectStrayEffects(root, imports, toolClasses);
+  return { filePath, packageName, imports, typeNames, declarations, toolClasses, enums, literalIssues, checkRefs, strayEffects };
 }
 
 /**
@@ -373,6 +387,62 @@ function collectLiteralIssues(root: SyntaxNode, imports: string[], toolClassName
     }
   }
   return out;
+}
+
+/**
+ * The effect an operation declares. No `@Confiqure.Effect` → NONE. Otherwise the value must name a
+ * `Confiqure.OperationEffect` constant in a form Java resolves to it: `Confiqure.OperationEffect.X` (or fully
+ * qualified), `OperationEffect.X` when the file imports `ai.confiqure.Confiqure.OperationEffect` (or
+ * `ai.confiqure.Confiqure.*`), or a bare `X` when it statically imports that constant (or `…OperationEffect.*`).
+ * Anything else (a constant of another type, a local enum of the same name, no value) is null: unreadable.
+ */
+function operationEffect(
+  ann: SyntaxNode | null,
+  imports: string[]
+): Pick<ParsedOperation, "effect" | "effectDeclared"> {
+  if (!ann) return { effect: "NONE", effectDeclared: null };
+  let value: SyntaxNode | null = null;
+  for (const arg of ann.childForFieldName("arguments")?.namedChildren ?? []) {
+    if (!arg || arg.type.endsWith("comment")) continue;
+    if (arg.type !== "element_value_pair") value = arg;
+    else if (arg.childForFieldName("key")?.text === "value") value = arg.childForFieldName("value");
+  }
+  const text = (value?.text ?? "").replace(/\s+/g, "");
+  const declared = { text: text.slice(0, 80), line: (value ?? ann).startPosition.row + 1 };
+  return { effect: resolveEffect(text, imports), effectDeclared: declared };
+}
+
+function resolveEffect(text: string, imports: string[]): OperationEffect | null {
+  const constant = text.slice(text.lastIndexOf(".") + 1) as OperationEffect;
+  if (!OPERATION_EFFECTS.includes(constant)) return null;
+  const qualifier = text.includes(".") ? text.slice(0, text.lastIndexOf(".")) : "";
+  if (qualifier === "Confiqure.OperationEffect" || qualifier === "ai.confiqure.Confiqure.OperationEffect") return constant;
+  if (qualifier === "OperationEffect") {
+    return imports.some((i) => i === "ai.confiqure.Confiqure.OperationEffect" || i === "ai.confiqure.Confiqure.*") ? constant : null;
+  }
+  if (qualifier === "") {
+    return imports.some((i) => i === `ai.confiqure.Confiqure.OperationEffect.${constant}` || i === "ai.confiqure.Confiqure.OperationEffect.*")
+      ? constant
+      : null;
+  }
+  return null;
+}
+
+/** `@Confiqure.Effect` anywhere but on a public method of one of this file's tool classes: confiqure would never read it. */
+function collectStrayEffects(root: SyntaxNode, imports: string[], toolClasses: ParsedToolClass[]): { line: number; where: string }[] {
+  const toolNames = new Set(toolClasses.map((tc) => tc.className));
+  const out: { line: number; where: string }[] = [];
+  for (const ann of [...root.descendantsOfType("annotation"), ...root.descendantsOfType("marker_annotation")]) {
+    if (!ann || confiqureName(ann.childForFieldName("name")?.text ?? "", imports) !== "Effect") continue;
+    const owner = ann.parent?.parent;
+    const isOperation =
+      owner?.type === "method_declaration" &&
+      isPublic(owner) &&
+      owner.parent?.parent?.parent?.type === "program" &&
+      toolNames.has(enclosingClassName(owner) ?? "");
+    if (!isOperation) out.push({ line: ann.startPosition.row + 1, where: describeOwner(ann) });
+  }
+  return out.sort((a, b) => a.line - b.line);
 }
 
 /** Every ValidatedBy / VerifiedBy annotation in the file, with the class its value names. */
@@ -506,6 +576,7 @@ function extractToolClass(typeNode: SyntaxNode, doc: string | null, filePath: st
         path,
         browser: findConfiqureAnnotation(m, "Browser", imports) !== null,
         async: findConfiqureAnnotation(m, "Async", imports) !== null,
+        ...operationEffect(findConfiqureAnnotation(m, "Effect", imports), imports),
         inputType: extractInputType(m),
         returnType: m.childForFieldName("type")?.text ?? null,
         doc: pendingDoc,

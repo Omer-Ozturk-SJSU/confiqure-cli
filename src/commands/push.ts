@@ -5,6 +5,7 @@ import { requireCredentials } from "../credentials.js";
 import { loadConfig } from "../config.js";
 import { scanProject, ScanResult, DiscoveredClass, ToolFile } from "../scan.js";
 import { ChangeEntry, DiffResult, diffAgainstRegistry, renderDiff } from "../diff.js";
+import type { OperationEffect, ParsedOperation } from "../classTree.js";
 import {
   getRegistry,
   postUpload,
@@ -354,6 +355,15 @@ export function uploadPathsOf(scan: ScanResult, changes: ChangeEntry[]): string[
 }
 
 /**
+ * An operation's effect for the manifest. A null effect (declared but unreadable) is a scan error that stops the push
+ * before any manifest is built; reaching here with one is a bug, never a silent NONE.
+ */
+function manifestEffect(className: string, op: ParsedOperation): OperationEffect {
+  if (op.effect === null) throw new Error(`${className}.${op.name}: @Confiqure.Effect could not be read; the scan should have stopped the push.`);
+  return op.effect;
+}
+
+/**
  * The upload manifest for `changes` (default: every scanned class, as `--force` sends it).
  * `toolClasses` carries only the tool classes among the changes, with their operations.
  */
@@ -382,6 +392,7 @@ export function buildManifest(
         path: op.path,
         browser: op.browser,
         async: op.async,
+        effect: manifestEffect(tc.className, op),
         inputType: op.inputType,
         returnType: op.returnType,
         doc: op.doc,

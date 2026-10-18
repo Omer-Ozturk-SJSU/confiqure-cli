@@ -100,6 +100,31 @@ export function lintCheckRefs(parsed: ParsedFile[]): string[] {
 }
 
 /**
+ * Annotation 3.2 operation effects: a declared `@Confiqure.Effect` whose value the scan cannot read, or one that sits
+ * on anything but a tool-class operation, is a push error. Reading it as NONE would offer a page-opening operation to a
+ * mobile chat; leaving it unread would drop what the developer declared.
+ */
+export function lintOperationEffects(parsed: ParsedFile[]): string[] {
+  const out: string[] = [];
+  for (const pf of parsed) {
+    for (const tc of pf.toolClasses) {
+      for (const op of tc.operations) {
+        if (op.effect !== null || !op.effectDeclared) continue;
+        const value = op.effectDeclared.text ? `(${op.effectDeclared.text})` : " with no value";
+        out.push(
+          `${pf.filePath}:${op.effectDeclared.line}: ${tc.className}.${op.name}() — @Confiqure.Effect${value} is not a value confiqure can read. ` +
+            "Write Confiqure.OperationEffect.PAGE_OPENING or Confiqure.OperationEffect.NONE (or import ai.confiqure.Confiqure.OperationEffect)."
+        );
+      }
+    }
+    for (const e of pf.strayEffects) {
+      out.push(`${pf.filePath}:${e.line}: ${e.where} — @Confiqure.Effect is read only on a public operation of a @Confiqure.Tool class; here confiqure would never see it.`);
+    }
+  }
+  return out;
+}
+
+/**
  * Annotation 3.0 gate: the pre-3.0 forms are ERRORS, not warnings — `push` prints them and stops
  * before uploading. The class-level `@Confiqure(...)` / bare `@Confiqure` marker and a method-level
  * `@Confiqure.Tool` no longer compile against annotation 3.0.0, and the backend refuses an object

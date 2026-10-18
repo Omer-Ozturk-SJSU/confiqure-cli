@@ -1,5 +1,6 @@
 import { Credentials } from "./credentials.js";
 import { ChangeEntry } from "./diff.js";
+import type { OperationEffect } from "./classTree.js";
 
 export interface RegistryItem {
   pushHistoryId: number;
@@ -174,6 +175,8 @@ export interface ManifestOperation {
   path: string | null;
   browser: boolean;
   async: boolean;
+  /** `@Confiqure.Effect` (annotation 3.2); NONE when the operation declares none. Always sent by CLI 1.2+. */
+  effect: OperationEffect;
   inputType: string | null;
   returnType: string | null;
   doc: string | null;
